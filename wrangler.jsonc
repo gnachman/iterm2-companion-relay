@@ -1,0 +1,31 @@
+{
+  // iTerm2 Companion room relay. See ../../docs/companion-relay-design.md for
+  // the full design and the one-time deploy/setup steps.
+  "name": "iterm2-companion-relay",
+  "main": "src/index.js",
+  "compatibility_date": "2025-09-06",
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "ROOM",
+        "class_name": "Room"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      // SQLite-backed DO (required for WebSocket hibernation on the free plan).
+      "tag": "v1",
+      "new_sqlite_classes": ["Room"]
+    }
+  ],
+  "vars": {
+    // Fail-closed: only an explicit "false" disables attestation. Unset or any
+    // other value means attestation is required (the hosted posture).
+    "ATTEST_REQUIRED": "true",
+    // The app id the verifier requires (team id + bundle id).
+    "APP_ID": "H7V7XYVQ7D.com.googlecode.iterm2.companion",
+    // Accepted App Attest environment: "production" or "development".
+    "APPATTEST_ENV": "production"
+  }
+}

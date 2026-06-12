@@ -1,0 +1,17 @@
+{
+  "name": "iterm2-companion-relay",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Cloudflare Worker + Durable Object relay for iTerm2 Companion remote connectivity. Splices a phone and a Mac through outbound WebSockets; sees only ciphertext. See ../../docs/companion-relay-design.md.",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "@cloudflare/vitest-pool-workers": "^0.8.71",
+    "vitest": "^3.2.4",
+    "wrangler": "^4.0.0"
+  }
+}

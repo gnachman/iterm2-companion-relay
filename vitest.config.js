@@ -16,7 +16,10 @@ export default defineWorkersConfig({
         // directly). Attested/established admission is exercised via the
         // verifier-registration path, which does not depend on this var.
         miniflare: {
-          bindings: { ATTEST_REQUIRED: "false" },
+          bindings: {
+            ATTEST_REQUIRED: "false",
+            RELAY_ORIGIN: "https://relay.example",
+          },
         },
       },
     },

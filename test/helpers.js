@@ -1,9 +1,64 @@
 // Test helpers for driving the relay over real WebSockets in workerd.
 
-import { SELF, env } from "cloudflare:test";
+import { SELF, env, runInDurableObject } from "cloudflare:test";
 import { expect } from "vitest";
 
 let counter = 0;
+
+/// The relay origin the DO binds into join transcripts (matches the
+/// RELAY_ORIGIN test binding in vitest.config.js).
+export const ORIGIN = "https://relay.example";
+
+const ROLE_BYTE = { mac: 1, phone: 2 };
+
+function b64ToBytes(s) {
+  return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+function bytesToB64(b) {
+  let s = "";
+  for (const x of b) s += String.fromCharCode(x);
+  return btoa(s);
+}
+
+/// Build the join transcript exactly as RelayJoin.transcript does:
+/// [version=1, roleByte] || nonce || roomName(utf8) || origin(utf8).
+export function transcript(role, nonceB64, roomName, origin = ORIGIN) {
+  const nonce = b64ToBytes(nonceB64);
+  const enc = new TextEncoder();
+  const head = new Uint8Array([1, ROLE_BYTE[role]]);
+  const parts = [head, nonce, enc.encode(roomName), enc.encode(origin)];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+/// A fresh Ed25519 join keypair; returns { privateKey, verifierB64 }.
+export async function makeJoinKey() {
+  const kp = await crypto.subtle.generateKey({ name: "Ed25519" }, true, ["sign", "verify"]);
+  const raw = new Uint8Array(await crypto.subtle.exportKey("raw", kp.publicKey));
+  return { privateKey: kp.privateKey, verifierB64: bytesToB64(raw) };
+}
+
+/// Sign bytes with an Ed25519 private key; returns base64.
+export async function signB64(privateKey, bytes) {
+  const sig = new Uint8Array(await crypto.subtle.sign({ name: "Ed25519" }, privateKey, bytes));
+  return bytesToB64(sig);
+}
+
+/// Seed a registered verifier directly into a room's DO storage, marking it an
+/// established room (bypasses /register so signature admission can be tested in
+/// isolation).
+export async function seedVerifier(room, verifierB64) {
+  const id = env.ROOM.idFromName(room);
+  const stub = env.ROOM.get(id);
+  await runInDurableObject(stub, async (_instance, state) => {
+    await state.storage.put("verifier", verifierB64);
+  });
+}
 
 /// A fresh, syntactically valid (64 lowercase hex) room name, unique per call
 /// so tests are isolated without isolated storage.
@@ -43,14 +98,23 @@ export async function openSocket(room) {
 }
 
 /// Run the full admission handshake: Hello -> (Challenge) -> Proof -> Result.
-/// Returns { ws, challenge, result }. proof defaults to empty (open-mode).
-export async function admit(room, role, proof = {}) {
+/// `proofFor` is given the parsed Challenge and returns the Proof object; it
+/// defaults to an empty proof (open-mode admission).
+export async function admit(room, role, proofFor = () => ({})) {
   const ws = await openSocket(room);
   ws.send(JSON.stringify({ v: 1, role }));
   const challenge = JSON.parse(await next(ws));
+  const proof = await proofFor(challenge);
   ws.send(JSON.stringify(proof));
   const result = JSON.parse(await next(ws));
   return { ws, challenge, result };
+}
+
+/// Admit using a join signature over the bound transcript (established rooms).
+export async function admitSigned(room, role, privateKey) {
+  return admit(room, role, async (challenge) => ({
+    sig: await signB64(privateKey, transcript(role, challenge.nonce, room)),
+  }));
 }
 
 /// Open admission mode is the test-wide default (set in vitest.config.js

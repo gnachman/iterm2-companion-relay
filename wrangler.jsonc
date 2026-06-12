@@ -26,6 +26,9 @@
     // The app id the verifier requires (team id + bundle id).
     "APP_ID": "H7V7XYVQ7D.com.googlecode.iterm2.companion",
     // Accepted App Attest environment: "production" or "development".
-    "APPATTEST_ENV": "production"
+    "APPATTEST_ENV": "production",
+    // This relay's canonical origin, bound into join transcripts and the
+    // App Attest clientDataHash. Must be the deployed origin.
+    "RELAY_ORIGIN": "https://iterm2-companion-relay.gnachman.workers.dev"
   }
 }

@@ -11,6 +11,13 @@ export default defineWorkersConfig({
         // using a unique room name per test instead.
         isolatedStorage: false,
         wrangler: { configPath: "./wrangler.jsonc" },
+        // Integration tests default to OPEN mode (the production wrangler var
+        // is fail-closed "true"; the fail-closed logic is unit-tested
+        // directly). Attested/established admission is exercised via the
+        // verifier-registration path, which does not depend on this var.
+        miniflare: {
+          bindings: { ATTEST_REQUIRED: "false" },
+        },
       },
     },
   },

@@ -22,7 +22,11 @@
   "vars": {
     // Fail-closed: only an explicit "false" disables attestation. Unset or any
     // other value means attestation is required (the hosted posture).
-    "ATTEST_REQUIRED": "true",
+    // TEMPORARY: open mode until App Attest is implemented. The relay is the
+    // only transport (Bonjour is off in the apps), so attestation cannot gate
+    // admission yet without breaking all pairing. Flip back to "true" the
+    // moment the /attest endpoints land.
+    "ATTEST_REQUIRED": "false",
     // The app id the verifier requires (team id + bundle id).
     "APP_ID": "H7V7XYVQ7D.com.googlecode.iterm2.companion",
     // Accepted App Attest environment: "production" or "development".

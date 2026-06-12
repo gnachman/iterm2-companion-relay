@@ -60,6 +60,25 @@ export async function seedVerifier(room, verifierB64) {
   });
 }
 
+/// Seed an already-expired registration token, to test TTL rejection.
+export async function seedExpiredToken(room, token) {
+  const id = env.ROOM.idFromName(room);
+  const stub = env.ROOM.get(id);
+  await runInDurableObject(stub, async (_instance, state) => {
+    await state.storage.put(`regtoken:${token}`, { expiresAt: Date.now() - 1000 });
+  });
+}
+
+/// POST /register. Returns { status, body }.
+export async function register(room, payload) {
+  const res = await SELF.fetch("https://relay.example/register", {
+    method: "POST",
+    headers: { "x-relay-room": room, "content-type": "application/json" },
+    body: JSON.stringify(payload),
+  });
+  return { status: res.status, body: await res.json() };
+}
+
 /// A fresh, syntactically valid (64 lowercase hex) room name, unique per call
 /// so tests are isolated without isolated storage.
 export function freshRoom() {

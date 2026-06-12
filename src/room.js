@@ -13,6 +13,16 @@ import { DurableObject } from "cloudflare:workers";
 const PROTOCOL_VERSION = 1;
 const NONCE_BYTES = 32;
 const ROLE_BYTE = { mac: 1, phone: 2 };
+// A registration token lives only long enough for the phone to make its
+// follow-up /register call within the same confirmed session.
+const REG_TOKEN_TTL_MS = 5 * 60 * 1000;
+
+function json(status, obj) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { "content-type": "application/json" },
+  });
+}
 
 // Fail closed: only an explicit "false" disables attestation. Unset, empty,
 // or any other value means required (the hosted posture). Exported for a
@@ -65,7 +75,11 @@ async function verifyJoin(sigB64, transcriptBytes, verifierB64) {
 export class Room extends DurableObject {
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
-      // HTTP endpoints (attest, register, delete) are added in later slices.
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname === "/register") {
+        return this.handleRegister(request);
+      }
+      // attest, delete are added in later slices.
       return new Response("not implemented", { status: 501 });
     }
     const pair = new WebSocketPair();
@@ -142,10 +156,10 @@ export class Room extends DurableObject {
     }
     // Open-mode pairing: admit on connect (the documented degradation; bounded
     // by the per-park cycle cap and SAS confirmation, added later).
-    this.admit(ws, att.role);
+    return this.admit(ws, att.role);
   }
 
-  admit(ws, role) {
+  async admit(ws, role) {
     // Two slots, newest-wins: displace any current holder of this role.
     for (const other of this.ctx.getWebSockets()) {
       if (other === ws) continue;
@@ -155,7 +169,46 @@ export class Room extends DurableObject {
       }
     }
     ws.serializeAttachment({ state: "admitted", role });
-    ws.send(JSON.stringify({ ok: true }));
+    const result = { ok: true };
+    if (role === "phone") {
+      // Mint a one-time registration token the phone presents to /register to
+      // register its verifier. Bound to this room (it lives in this DO's
+      // storage) and short-lived.
+      const token = b64(crypto.getRandomValues(new Uint8Array(24)));
+      await this.ctx.storage.put(`regtoken:${token}`, { expiresAt: Date.now() + REG_TOKEN_TTL_MS });
+      result.registrationToken = token;
+    }
+    ws.send(JSON.stringify(result));
+  }
+
+  async handleRegister(request) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { ok: false, error: "bad json" });
+    }
+    const { registrationToken, verifier } = body;
+    if (typeof verifier !== "string") {
+      return json(400, { ok: false, error: "missing verifier" });
+    }
+    // Overwrite protection: once a verifier is registered, it can only be
+    // changed by proving the current key (a later slice). A second
+    // first-registration is refused, so a room-name holder cannot hijack V.
+    if (await this.ctx.storage.get("verifier")) {
+      return json(403, { ok: false, error: "already registered" });
+    }
+    if (typeof registrationToken !== "string") {
+      return json(403, { ok: false, error: "token required" });
+    }
+    const key = `regtoken:${registrationToken}`;
+    const rec = await this.ctx.storage.get(key);
+    if (!rec || rec.expiresAt < Date.now()) {
+      return json(403, { ok: false, error: "bad token" });
+    }
+    await this.ctx.storage.delete(key); // single-use
+    await this.ctx.storage.put("verifier", verifier);
+    return json(200, { ok: true });
   }
 
   reject(ws, error) {

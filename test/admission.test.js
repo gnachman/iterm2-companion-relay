@@ -4,7 +4,7 @@
 // interprets spliced frames. See ../../../docs/companion-relay-design.md.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { admit, openSocket, next, openMode, freshRoom } from "./helpers.js";
+import { admit, openSocket, next, closed, openMode, freshRoom } from "./helpers.js";
 
 describe("admission + splice (open mode)", () => {
   beforeEach(() => openMode());
@@ -44,6 +44,54 @@ describe("admission + splice (open mode)", () => {
     phone.ws.send(payload);
     const got = await macGot;
     expect(new Uint8Array(got)).toEqual(payload);
+  });
+
+  it("closes the peer when one admitted side disconnects", async () => {
+    // The mac's link to the relay stays healthy when the phone vanishes, so
+    // without this the mac would wait forever. Closing the peer is what lets
+    // the mac notice the disconnect and re-park for a reconnect.
+    const room = freshRoom();
+    const mac = await admit(room, "mac");
+    const phone = await admit(room, "phone");
+    const macClosed = closed(mac.ws);
+    phone.ws.close(1000, "bye");
+    const ev = await macClosed;
+    expect(ev.code).toBe(1001);
+    expect(ev.reason).toBe("peer gone");
+  });
+
+  it("rejects a phone while no mac is parked, then admits once it arrives", async () => {
+    // Mac-restart reconnect: the mac is still relaunching when the phone tries
+    // to reconnect. The phone must be rejected (not admitted into an empty room
+    // where its handshake is dropped) so it retries cheaply. Once the mac parks,
+    // the next attempt is admitted and splices.
+    const room = freshRoom();
+
+    const early = await admit(room, "phone");
+    expect(early.result.ok).toBe(false);
+    expect(early.result.error).toBe("mac offline");
+
+    // Mac finishes relaunching and parks; now the phone's retry is admitted.
+    const mac = await admit(room, "mac");
+    const phone = await admit(room, "phone");
+    expect(phone.result.ok).toBe(true);
+
+    const got = next(mac.ws);
+    phone.ws.send("reached-the-mac");
+    expect(await got).toBe("reached-the-mac");
+  });
+
+  it("a reconnecting phone displaces the old one without closing the mac", async () => {
+    // Repeated phone retries (each a new socket displacing the prior) must never
+    // tear down the parked mac, or reconnect would livelock.
+    const room = freshRoom();
+    const mac = await admit(room, "mac");
+    await admit(room, "phone");
+    const phone2 = await admit(room, "phone"); // displaces the first phone
+
+    const got = next(mac.ws);
+    phone2.ws.send("still-spliced");
+    expect(await got).toBe("still-spliced");
   });
 
   it("does not forward pre-splice (before the peer is admitted)", async () => {

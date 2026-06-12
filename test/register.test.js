@@ -15,8 +15,11 @@ import {
 } from "./helpers.js";
 
 describe("registration token + /register", () => {
+  // A phone may only admit while a mac is parked (real pairing always has the
+  // mac waiting behind the QR), so these tests park one first.
   it("hands the phone a registration token at admission, but not the mac", async () => {
     const room = freshRoom();
+    await admit(room, "mac");
     const phone = await admit(room, "phone");
     expect(typeof phone.result.registrationToken).toBe("string");
 
@@ -27,6 +30,7 @@ describe("registration token + /register", () => {
   it("registers a verifier with a valid token and establishes the room", async () => {
     const room = freshRoom();
     const key = await makeJoinKey();
+    await admit(room, "mac");
     const phone = await admit(room, "phone");
 
     const reg = await register(room, {
@@ -53,6 +57,7 @@ describe("registration token + /register", () => {
   it("token is single-use", async () => {
     const room = freshRoom();
     const key = await makeJoinKey();
+    await admit(room, "mac");
     const phone = await admit(room, "phone");
     const token = phone.result.registrationToken;
 
@@ -65,6 +70,7 @@ describe("registration token + /register", () => {
   it("refuses to overwrite an existing verifier (overwrite protection)", async () => {
     const room = freshRoom();
     const key1 = await makeJoinKey();
+    await admit(room, "mac");
     const phone1 = await admit(room, "phone");
     await register(room, { registrationToken: phone1.result.registrationToken, verifier: key1.verifierB64 });
 
@@ -94,6 +100,7 @@ describe("registration token + /register", () => {
     const roomA = freshRoom();
     const roomB = freshRoom();
     const key = await makeJoinKey();
+    await admit(roomA, "mac");
     const phone = await admit(roomA, "phone");
     const reg = await register(roomB, {
       registrationToken: phone.result.registrationToken,

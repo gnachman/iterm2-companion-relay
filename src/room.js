@@ -160,7 +160,30 @@ export class Room extends DurableObject {
   }
 
   async admit(ws, role) {
-    // Two slots, newest-wins: displace any current holder of this role.
+    // A phone may only join while a mac is parked. Otherwise its Noise
+    // handshake would be sent into an empty room and silently dropped, and it
+    // would sit on a handshake timeout. Reject instead, so the phone retries
+    // cheaply until the mac is present (e.g. while the mac app relaunches) and
+    // lands within one retry of the mac parking. The mac itself parks anytime.
+    if (role === "phone") {
+      const macParked = this.ctx.getWebSockets().some((s) => {
+        if (s === ws) return false;
+        const a = s.deserializeAttachment();
+        return a && a.state === "admitted" && a.role === "mac";
+      });
+      if (!macParked) {
+        return this.reject(ws, "mac offline");
+      }
+    }
+    // Two slots, newest-wins: displace any current holder of this role. Do NOT
+    // close that holder's peer here: during a mac restart the phone retries its
+    // handshake every few seconds (each retry a new phone socket that displaces
+    // the prior one), and closing the peer would kill the freshly parked mac on
+    // every retry, livelocking reconnect. A stale mac (e.g. after a phone-side
+    // network hiccup) is instead torn down when the reconnecting phone's
+    // handshake reaches it and fails to decrypt, after which the mac re-parks
+    // and the phone's next retry lands. A cleanly closed socket is still handled
+    // by webSocketClose -> closePeerOf.
     for (const other of this.ctx.getWebSockets()) {
       if (other === ws) continue;
       const a = other.deserializeAttachment();
@@ -233,6 +256,36 @@ export class Room extends DurableObject {
   }
 
   async webSocketClose(ws) {
-    // Nothing to persist yet; slot is freed by the socket going away.
+    this.closePeerOf(ws);
+  }
+
+  async webSocketError(ws) {
+    this.closePeerOf(ws);
+  }
+
+  // When one admitted side goes away, close the other so it learns the peer is
+  // gone instead of waiting forever (its own link to the relay stays healthy).
+  // This is what lets the mac notice a disconnect and re-park for a reconnect.
+  closePeerOf(ws) {
+    let att;
+    try {
+      att = ws.deserializeAttachment();
+    } catch {
+      return;
+    }
+    if (!att || att.state !== "admitted") {
+      return;
+    }
+    for (const peer of this.ctx.getWebSockets()) {
+      if (peer === ws) continue;
+      const a = peer.deserializeAttachment();
+      if (a && a.state === "admitted" && a.role !== att.role) {
+        try {
+          peer.close(1001, "peer gone");
+        } catch {
+          // ignore
+        }
+      }
+    }
   }
 }

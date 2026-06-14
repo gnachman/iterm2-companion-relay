@@ -310,7 +310,12 @@ export class Room extends DurableObject {
         environment: this.env.APPATTEST_ENV,
         trustedRootPem: this.env.APPATTEST_ROOT_PEM || APPLE_APP_ATTEST_ROOT_PEM,
       });
-    } catch {
+    } catch (e) {
+      // Log the specific reason (chain, nonce, AAGUID/environment, app id) so
+      // `wrangler tail` reveals which check failed during device testing. The
+      // body stays generic, since the client cannot act on the detail. The
+      // attestation is opaque to the relay, so the message leaks nothing.
+      console.warn("attest rejected:", e?.message);
       return json(403, { ok: false, error: "attestation rejected" });
     }
 

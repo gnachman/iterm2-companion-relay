@@ -99,7 +99,12 @@ export async function verifyAttestation({
 
   const aaguid = authData.subarray(37, 53);
   const expectedAaguid = environment === "development" ? AAGUID_DEV : AAGUID_PROD;
-  if (!equalBytes(aaguid, expectedAaguid)) throw new AppAttestError("AAGUID/environment mismatch");
+  if (!equalBytes(aaguid, expectedAaguid)) {
+    // Name the actual AAGUID so a mismatch is diagnosable: "appattest" is the
+    // production attestation service, "appattestdevelop" the development one.
+    const got = new TextDecoder().decode(aaguid).replace(/\0+$/, "");
+    throw new AppAttestError(`AAGUID/environment mismatch: got "${got}", env="${environment}"`);
+  }
 
   const credIdLen = (authData[53] << 8) | authData[54];
   const credentialId = authData.subarray(55, 55 + credIdLen);

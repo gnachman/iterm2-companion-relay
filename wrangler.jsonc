@@ -27,14 +27,12 @@
   "vars": {
     // Fail-closed: only an explicit "false" disables attestation. Unset or any
     // other value means attestation is required (the hosted posture).
-    // TEMPORARY: still open mode. Both ends are now implemented (worker:
-    // /attest/challenge + /attest + ticketed admission + assertion-gated
-    // /register, anchored at Apple's root; phone: App Attest ticket + register
-    // assertion). Flip to "true" only after confirming on a real device that
-    // attestKey/generateAssertion succeed and the AAGUID matches APPATTEST_ENV
-    // (the app forces appattest-environment=production). Until then an older
-    // phone build that does not attest would be locked out.
-    "ATTEST_REQUIRED": "false",
+    // ENABLED: a fresh pairing must present an App Attest ticket; the phone's
+    // verifier registration must carry an assertion. A phone build that cannot
+    // attest (no App Attest client, or AAGUID != APPATTEST_ENV) is locked out
+    // of fresh pairings. Established rooms still admit by signature, so existing
+    // pairings keep reconnecting. Revert to "false" to reopen pairing.
+    "ATTEST_REQUIRED": "true",
     // The app id the verifier requires (team id + bundle id).
     "APP_ID": "H7V7XYVQ7D.com.googlecode.iterm2.companion",
     // Accepted App Attest environment: "production" or "development".

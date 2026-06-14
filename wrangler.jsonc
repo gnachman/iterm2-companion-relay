@@ -4,6 +4,11 @@
   "name": "iterm2-companion-relay",
   "main": "src/index.js",
   "compatibility_date": "2025-09-06",
+  // Retain console logs so the admission control-plane is debuggable in
+  // production (Workers Logs in the dashboard), not just via live `wrangler
+  // tail`. The relay sees only ciphertext and logs an opaque room tag, so no
+  // payload or rendezvous secret is captured.
+  "observability": { "enabled": true },
   "durable_objects": {
     "bindings": [
       {

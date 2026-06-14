@@ -32,6 +32,21 @@ function json(status, obj) {
   });
 }
 
+// A short, opaque, non-reversible log tag for a room. The room name is itself a
+// rendezvous secret (knowing it lets an attacker target the room for DoS), so
+// logs identify a room by hash(roomName), enough to correlate events without
+// leaking the name. Computed once per connection and carried in the socket
+// attachment so the synchronous log sites can read it.
+async function roomTag(roomName) {
+  if (!roomName) return "????????";
+  const h = new Uint8Array(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(roomName)));
+  return [...h.slice(0, 4)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+
+function tagOf(att) {
+  return (att && att.tag) || "????????";
+}
+
 // Fail closed: only an explicit "false" disables attestation. Unset, empty,
 // or any other value means required (the hosted posture). Exported for a
 // direct unit test of the fail-closed logic.
@@ -108,8 +123,14 @@ export class Room extends DurableObject {
     const server = pair[1];
     this.ctx.acceptWebSocket(server);
     // Capture the room name (validated by the entry Worker) so admission can
-    // build the join transcript; it's bound into the signature.
-    server.serializeAttachment({ state: "hello", roomName: request.headers.get("x-relay-room") });
+    // build the join transcript; it's bound into the signature. Also derive a
+    // short log tag = hash(roomName): the room name is itself a rendezvous
+    // secret (knowing it lets an attacker target the room), so logs correlate
+    // by an opaque, non-reversible tag instead of leaking the name.
+    const roomName = request.headers.get("x-relay-room");
+    const tag = await roomTag(roomName);
+    server.serializeAttachment({ state: "hello", roomName, tag });
+    console.log(`relay ${tag} connect`);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -145,7 +166,9 @@ export class Room extends DurableObject {
       role: hello.role,
       nonce: b64(nonce),
       roomName: att.roomName,
+      tag: att.tag,
     });
+    console.log(`relay ${tagOf(att)} hello role=${hello.role} -> challenged`);
     ws.send(JSON.stringify({ nonce: b64(nonce) }));
   }
 
@@ -168,7 +191,7 @@ export class Room extends DurableObject {
       if (!(await verifyJoin(proof.sig, transcript, verifier))) {
         return this.reject(ws, "bad signature");
       }
-      return this.admit(ws, att.role);
+      return this.admit(ws, att.role, null, "signed");
     }
 
     if (attestationRequired(this.env)) {
@@ -178,7 +201,7 @@ export class Room extends DurableObject {
       // the QR). The phone must present a valid, single-use ticket it earned by
       // attesting over /attest.
       if (att.role === "mac") {
-        return this.admit(ws, att.role);
+        return this.admit(ws, att.role, null, "park(pre-auth mac)");
       }
       if (typeof proof.ticket !== "string") {
         return this.reject(ws, "ticket required");
@@ -189,14 +212,15 @@ export class Room extends DurableObject {
         return this.reject(ws, "bad ticket");
       }
       await this.ctx.storage.delete(ticketKey); // single-use
-      return this.admit(ws, att.role, { keyId: ticketRec.keyId, publicKey: ticketRec.publicKey });
+      return this.admit(ws, att.role, { keyId: ticketRec.keyId, publicKey: ticketRec.publicKey }, "ticket");
     }
     // Open-mode pairing: admit on connect (the documented degradation; bounded
     // by the per-park cycle cap and SAS confirmation, added later).
-    return this.admit(ws, att.role);
+    return this.admit(ws, att.role, null, "open");
   }
 
-  async admit(ws, role, attest = null) {
+  async admit(ws, role, attest = null, via = "?") {
+    const prev = ws.deserializeAttachment() || {};
     // A phone may only join while a mac is parked. Otherwise its Noise
     // handshake would be sent into an empty room and silently dropped, and it
     // would sit on a handshake timeout. Reject instead, so the phone retries
@@ -225,10 +249,20 @@ export class Room extends DurableObject {
       if (other === ws) continue;
       const a = other.deserializeAttachment();
       if (a && a.state === "admitted" && a.role === role) {
+        console.log(`relay ${tagOf(prev)} displacing existing ${role}`);
         other.close(1000, "displaced");
       }
     }
-    ws.serializeAttachment({ state: "admitted", role });
+    // Preserve roomName/tag across the state change so forwarding/close logging
+    // can still identify the room.
+    ws.serializeAttachment({ state: "admitted", role, roomName: prev.roomName, tag: prev.tag });
+    const peerPresent = this.ctx.getWebSockets().some((s) => {
+      if (s === ws) return false;
+      const a = s.deserializeAttachment();
+      return a && a.state === "admitted" && a.role !== role;
+    });
+    console.log(`relay ${tagOf(prev)} admit role=${role} via=${via} peer=${peerPresent}`
+      + (peerPresent ? " (spliced)" : ""));
     const result = { ok: true };
     if (role === "phone") {
       // Mint a one-time registration token the phone presents to /register to
@@ -400,6 +434,13 @@ export class Room extends DurableObject {
   }
 
   reject(ws, error) {
+    let att;
+    try {
+      att = ws.deserializeAttachment();
+    } catch {
+      // ignore
+    }
+    console.log(`relay ${tagOf(att)} reject role=${att?.role ?? "?"}: ${error}`);
     try {
       ws.send(JSON.stringify({ ok: false, error }));
     } catch {
@@ -420,11 +461,18 @@ export class Room extends DurableObject {
     // No peer yet (pre-splice): drop silently, do not error the socket.
   }
 
-  async webSocketClose(ws) {
+  async webSocketClose(ws, code, reason) {
+    let att;
+    try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
+    console.log(`relay ${tagOf(att)} close role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
+      + `code=${code ?? "?"}${reason ? ` reason=${reason}` : ""}`);
     this.closePeerOf(ws);
   }
 
   async webSocketError(ws) {
+    let att;
+    try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
+    console.log(`relay ${tagOf(att)} socket error role=${att?.role ?? "?"} state=${att?.state ?? "?"}`);
     this.closePeerOf(ws);
   }
 
@@ -445,6 +493,7 @@ export class Room extends DurableObject {
       if (peer === ws) continue;
       const a = peer.deserializeAttachment();
       if (a && a.state === "admitted" && a.role !== att.role) {
+        console.log(`relay ${tagOf(att)} peer gone (role=${att.role}); closing ${a.role}`);
         try {
           peer.close(1001, "peer gone");
         } catch {

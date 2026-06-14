@@ -2,17 +2,23 @@
 // Manually exercise the relay's hardening defenses against a live deployment
 // and report, for each, whether the attack was STOPPED.
 //
+// Run from anywhere (cwd does not matter):
+//   node submodules/iterm2-companion-relay/tools/probe-defenses.mjs [origin]
+// or from this submodule:
 //   node tools/probe-defenses.mjs [origin]
 //
 // origin defaults to the production relay. Each probe uses a fresh random room
 // name, so it never touches a real pairing. The relay sees only ciphertext;
 // these probes drive the admission/forwarding control plane, not user data.
 //
-// Requires the `ws` package (installed as a dev dependency of this project):
-// the WHATWG WebSocket cannot set the x-relay-room header the relay needs.
+// Uses the `ws` package (a dev dependency of this submodule, resolved relative
+// to this script): the WHATWG WebSocket cannot set the x-relay-room header.
 
-import WebSocket from "ws";
+import { createRequire } from "node:module";
 import crypto from "node:crypto";
+
+// Resolve `ws` from this submodule's node_modules regardless of the cwd.
+const WebSocket = createRequire(import.meta.url)("ws");
 
 const ORIGIN = (process.argv[2] || "https://iterm2-companion-relay.gnachman.workers.dev").replace(/\/$/, "");
 const WSURL = ORIGIN.replace(/^http/, "ws") + "/";

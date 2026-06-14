@@ -25,6 +25,29 @@ const ATTEST_CHALLENGE_TTL_MS = 5 * 60 * 1000;
 const TICKET_TTL_MS = 5 * 60 * 1000;
 const MAX_OUTSTANDING_CHALLENGES = 16;
 
+// --- Hardening / quotas (availability + cost; the relay sees only ciphertext) ---
+// (1) Pre-auth loitering: a socket that connects but never admits holds a
+//     hibernatable WebSocket. Cap how many may be outstanding at once (drop the
+//     oldest) and close any that do not admit within the deadline.
+const MAX_PREAUTH_SOCKETS = 4;
+const PREAUTH_DEADLINE_MS = 15 * 1000;
+// (2) Admission flood: an attacker who knows the room name can churn
+//     connect -> proof -> reject, forcing signature verifies. Cap proof
+//     attempts per room per window (in-memory; resets on hibernation, which
+//     only happens when the room is idle, i.e. not under attack).
+const ADMISSION_WINDOW_MS = 10 * 1000;
+const MAX_ADMISSION_ATTEMPTS = 40;
+// (3) Splice abuse: cap spliced frame size and rate. Noise transport messages
+//     are <= 65535 bytes; control frames (hello/proof) are tiny.
+const MAX_FRAME_BYTES = 256 * 1024;
+const MAX_CONTROL_BYTES = 8 * 1024;
+const FRAME_WINDOW_MS = 1000;
+const MAX_FRAMES_PER_WINDOW = 500;
+// (1)+(4) Housekeeping alarm cadence, and how long a never-established room may
+//     sit idle before its leftover state is reclaimed.
+const HOUSEKEEPING_INTERVAL_MS = 15 * 1000;
+const EPHEMERAL_PREFIXES = ["ticket:", "regtoken:", "attestchallenge:"];
+
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
     status,
@@ -102,7 +125,54 @@ async function verifyJoin(sigB64, transcriptBytes, verifierB64) {
   }
 }
 
+// (4) The bytes a room-deletion request signs. Distinct from a join transcript
+// (which carries role byte 1=mac or 2=phone): op byte 0 marks a delete, so a
+// captured join signature can never be replayed to authorize a deletion. Bound
+// to a fresh single-use challenge (anti-replay), the room name, and the origin.
+function deleteTranscript(challengeB64, roomName, origin) {
+  const challenge = b64ToBytes(challengeB64);
+  const enc = new TextEncoder();
+  const head = new Uint8Array([PROTOCOL_VERSION, 0]);
+  const parts = [head, challenge, enc.encode(roomName), enc.encode(origin)];
+  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+  let o = 0;
+  for (const p of parts) {
+    out.set(p, o);
+    o += p.length;
+  }
+  return out;
+}
+
+function safeAttachment(ws) {
+  try {
+    return ws.deserializeAttachment();
+  } catch {
+    return null;
+  }
+}
+
 export class Room extends DurableObject {
+  constructor(ctx, env) {
+    super(ctx, env);
+    // In-memory fixed-window rate counters (per live DO instance). Lost on
+    // hibernation, which only occurs when the room is idle, so a flood (which
+    // keeps the DO live) is still bounded.
+    this.admissionWindow = { start: 0, count: 0 };
+    this.frameWindow = { start: 0, count: 0 };
+  }
+
+  // Fixed-window limiter: bumps the window's count and reports whether it now
+  // exceeds max. Resets the window after windowMs.
+  rateLimited(window, max, windowMs) {
+    const now = Date.now();
+    if (now - window.start > windowMs) {
+      window.start = now;
+      window.count = 0;
+    }
+    window.count += 1;
+    return window.count > max;
+  }
+
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
       const url = new URL(request.url);
@@ -124,7 +194,10 @@ export class Room extends DurableObject {
     // by an opaque, non-reversible tag instead of leaking the name.
     const roomName = request.headers.get("x-relay-room");
     const tag = await roomTag(roomName);
-    server.serializeAttachment({ state: "hello", roomName, tag });
+    server.serializeAttachment({ state: "hello", roomName, tag, connectedAt: Date.now() });
+    // (1) Bound simultaneous un-admitted sockets, and arm the deadline sweep.
+    this.evictExcessPreAuth(tag);
+    await this.ensureAlarm();
     console.log(`relay ${tag} connect`);
     return new Response(null, { status: 101, webSocket: client });
   }
@@ -139,18 +212,35 @@ export class Room extends DurableObject {
     if (request.method === "POST" && url.pathname === "/attest") {
       return this.handleAttest(request);
     }
-    // delete is added in a later slice.
+    if (request.method === "POST" && url.pathname === "/delete") {
+      return this.handleDelete(request);
+    }
     return new Response("not implemented", { status: 501 });
   }
 
   async webSocketMessage(ws, message) {
     const att = ws.deserializeAttachment() || { state: "hello" };
+    // (3) Cap frame size: huge frames (control or spliced) are abuse. Noise
+    //     transport messages are <= 65535 bytes; control frames are tiny.
+    const size = typeof message === "string" ? message.length : message.byteLength;
+    const cap = att.state === "admitted" ? MAX_FRAME_BYTES : MAX_CONTROL_BYTES;
+    if (size > cap) {
+      console.log(`relay ${tagOf(att)} frame too large (${size} > ${cap}); closing`);
+      try { ws.close(1009, "frame too large"); } catch { /* ignore */ }
+      return;
+    }
     switch (att.state) {
       case "hello":
         return this.handleHello(ws, att, message);
       case "challenged":
         return this.handleProof(ws, att, message);
       case "admitted":
+        // (3) Cap spliced frame rate per room.
+        if (this.rateLimited(this.frameWindow, MAX_FRAMES_PER_WINDOW, FRAME_WINDOW_MS)) {
+          console.log(`relay ${tagOf(att)} frame rate exceeded; closing`);
+          try { ws.close(1008, "frame rate exceeded"); } catch { /* ignore */ }
+          return;
+        }
         return this.forward(ws, att, message);
       default:
         ws.close(1011, "bad state");
@@ -182,6 +272,11 @@ export class Room extends DurableObject {
   }
 
   async handleProof(ws, att, message) {
+    // (2) Rate-limit proof attempts per room BEFORE any signature verify, so a
+    //     flood of bogus proofs cannot force unbounded crypto work.
+    if (this.rateLimited(this.admissionWindow, MAX_ADMISSION_ATTEMPTS, ADMISSION_WINDOW_MS)) {
+      return this.reject(ws, "rate limited");
+    }
     let proof;
     try {
       proof = JSON.parse(message);
@@ -286,6 +381,7 @@ export class Room extends DurableObject {
         rec.attestPublicKey = attest.publicKey;
       }
       await this.ctx.storage.put(`regtoken:${token}`, rec);
+      await this.ensureAlarm(); // (4) so the token is pruned if never used
       result.registrationToken = token;
     }
     ws.send(JSON.stringify(result));
@@ -309,6 +405,7 @@ export class Room extends DurableObject {
     }
     const challenge = b64(crypto.getRandomValues(new Uint8Array(NONCE_BYTES)));
     await this.ctx.storage.put(`attestchallenge:${challenge}`, { expiresAt: now + ATTEST_CHALLENGE_TTL_MS });
+    await this.ensureAlarm(); // (4) so an unused challenge is pruned, not left to the cap
     return json(200, { ok: true, challenge });
   }
 
@@ -368,6 +465,7 @@ export class Room extends DurableObject {
       keyId: b64(attested.keyId),
       publicKey: b64(attested.publicKeyRaw),
     });
+    await this.ensureAlarm(); // (4) so an unredeemed ticket is pruned
     return json(200, { ok: true, ticket });
   }
 
@@ -440,6 +538,114 @@ export class Room extends DurableObject {
     await this.ctx.storage.delete(key); // single-use
     await this.ctx.storage.put("verifier", verifier);
     return json(200, { ok: true });
+  }
+
+  // (4) Signed room deletion / revocation. Proves possession of the room key by
+  // signing a delete transcript over a fresh single-use challenge, then wipes
+  // all state and disconnects both sides. Only an established room (a verifier
+  // exists) can be deleted; an un-established room has no key to authorize with.
+  async handleDelete(request) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { ok: false, error: "bad json" });
+    }
+    const verifier = await this.ctx.storage.get("verifier");
+    if (!verifier) return json(403, { ok: false, error: "not established" });
+    if (typeof body.challenge !== "string" || typeof body.signature !== "string") {
+      return json(403, { ok: false, error: "signature required" });
+    }
+    const challengeKey = `attestchallenge:${body.challenge}`;
+    const challengeRec = await this.ctx.storage.get(challengeKey);
+    if (!challengeRec || challengeRec.expiresAt < Date.now()) {
+      return json(403, { ok: false, error: "bad challenge" });
+    }
+    await this.ctx.storage.delete(challengeKey); // single-use
+    const roomName = request.headers.get("x-relay-room");
+    const transcript = deleteTranscript(body.challenge, roomName, this.env.RELAY_ORIGIN);
+    if (!(await verifyJoin(body.signature, transcript, verifier))) {
+      return json(403, { ok: false, error: "bad signature" });
+    }
+    console.log(`relay ${await roomTag(roomName)} DELETE authorized; wiping room`);
+    for (const ws of this.ctx.getWebSockets()) {
+      try {
+        ws.close(1000, "room deleted");
+      } catch {
+        // ignore
+      }
+    }
+    await this.ctx.storage.deleteAll();
+    return json(200, { ok: true });
+  }
+
+  // (1) Drop the oldest un-admitted sockets over the cap, so a loiterer flood
+  // cannot pin unbounded pre-auth sockets.
+  evictExcessPreAuth(tag) {
+    const preAuth = this.ctx.getWebSockets()
+      .map((ws) => ({ ws, a: safeAttachment(ws) }))
+      .filter(({ a }) => a && a.state !== "admitted")
+      .sort((x, y) => (x.a.connectedAt || 0) - (y.a.connectedAt || 0));
+    for (let i = 0; i < preAuth.length - MAX_PREAUTH_SOCKETS; i++) {
+      console.log(`relay ${tag} evicting oldest pre-auth socket (cap ${MAX_PREAUTH_SOCKETS})`);
+      try {
+        preAuth[i].ws.close(1008, "too many pending");
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  // Arm the housekeeping alarm if one is not already pending.
+  async ensureAlarm() {
+    if ((await this.ctx.storage.getAlarm()) === null) {
+      await this.ctx.storage.setAlarm(Date.now() + HOUSEKEEPING_INTERVAL_MS);
+    }
+  }
+
+  // Housekeeping: (1) close pre-auth sockets past the admission deadline, and
+  // (4) prune expired ephemeral state. Reschedules only while there is
+  // something left to watch, so an idle/established room lets the DO hibernate.
+  async alarm() {
+    const now = Date.now();
+    let pendingPreAuth = 0;
+    for (const ws of this.ctx.getWebSockets()) {
+      const a = safeAttachment(ws);
+      if (!a || a.state === "admitted") continue;
+      if (a.connectedAt && now - a.connectedAt > PREAUTH_DEADLINE_MS) {
+        console.log(`relay ${tagOf(a)} pre-auth socket timed out; closing`);
+        try {
+          ws.close(1008, "admission timeout");
+        } catch {
+          // ignore
+        }
+      } else {
+        pendingPreAuth += 1;
+      }
+    }
+    const remainingEphemeral = await this.pruneExpired(now);
+    if (pendingPreAuth > 0 || remainingEphemeral > 0) {
+      await this.ctx.storage.setAlarm(now + HOUSEKEEPING_INTERVAL_MS);
+    }
+  }
+
+  // Delete expired single-use ephemeral records (tickets, registration tokens,
+  // attest challenges). Returns the count of still-live ephemeral records, so a
+  // never-established room is reclaimed (storage emptied, alarm lapses, DO goes
+  // dormant) once its leftovers age out. The verifier is intentionally NOT
+  // touched: an established room must survive idle periods to reconnect.
+  async pruneExpired(now) {
+    let live = 0;
+    for (const prefix of EPHEMERAL_PREFIXES) {
+      for (const [k, rec] of await this.ctx.storage.list({ prefix })) {
+        if (rec && typeof rec.expiresAt === "number" && rec.expiresAt < now) {
+          await this.ctx.storage.delete(k);
+        } else {
+          live += 1;
+        }
+      }
+    }
+    return live;
   }
 
   reject(ws, error) {

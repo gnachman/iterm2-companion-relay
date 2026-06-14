@@ -10,6 +10,7 @@
 
 import { DurableObject } from "cloudflare:workers";
 import { verifyAttestation } from "./appattest.js";
+import { APPLE_APP_ATTEST_ROOT_PEM } from "./appleRoot.js";
 
 const PROTOCOL_VERSION = 1;
 const NONCE_BYTES = 32;
@@ -307,7 +308,7 @@ export class Room extends DurableObject {
         clientDataHash,
         appId: this.env.APP_ID,
         environment: this.env.APPATTEST_ENV,
-        trustedRootPem: this.env.APPATTEST_ROOT_PEM,
+        trustedRootPem: this.env.APPATTEST_ROOT_PEM || APPLE_APP_ATTEST_ROOT_PEM,
       });
     } catch {
       return json(403, { ok: false, error: "attestation rejected" });

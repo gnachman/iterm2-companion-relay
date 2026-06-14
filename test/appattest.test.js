@@ -164,3 +164,13 @@ describe("verifyAttestation", () => {
     })).rejects.toThrow(/format/);
   });
 });
+
+import { APPLE_APP_ATTEST_ROOT_PEM } from "../src/appleRoot.js";
+
+describe("Apple App Attest root", () => {
+  it("is a parseable certificate for Apple's App Attestation Root CA", () => {
+    const cert = new x509.X509Certificate(APPLE_APP_ATTEST_ROOT_PEM);
+    expect(cert.subject).toContain("Apple App Attestation Root CA");
+    expect(cert.subject).toContain("Apple Inc.");
+  });
+});

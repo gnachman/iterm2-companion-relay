@@ -75,22 +75,57 @@ async function buildAttestation(challengeB64, origin = ORIGIN) {
     attStmt: { x5c: [new Uint8Array(leaf.rawData), new Uint8Array(intermediate.rawData)], receipt: new Uint8Array([0]) },
     authData,
   });
-  return b64(attestationObject);
+  return { attestationObject: b64(attestationObject), leafKeys };
+}
+
+// raw(r||s) -> DER, so synthetic assertions ship the DER form Apple uses.
+function derInteger(bytes) {
+  let i = 0;
+  while (i < bytes.length - 1 && bytes[i] === 0) i++;
+  let v = bytes.subarray(i);
+  if (v[0] & 0x80) v = concat(new Uint8Array([0x00]), v);
+  return concat(new Uint8Array([0x02, v.length]), v);
+}
+function rawToDer(raw) {
+  const body = concat(derInteger(raw.subarray(0, 32)), derInteger(raw.subarray(32, 64)));
+  return concat(new Uint8Array([0x30, body.length]), body);
+}
+
+// An App Attest assertion signed by `keys` over a fresh challenge.
+async function buildAssertion(keys, challengeB64, { appId = APP_ID, counter = 1, origin = ORIGIN } = {}) {
+  const rpIdHash = await sha256(new TextEncoder().encode(appId));
+  const counterBytes = new Uint8Array([
+    (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff]);
+  const authenticatorData = concat(rpIdHash, new Uint8Array([0x00]), counterBytes);
+  const clientDataHash = await sha256(concat(b64ToBytes(challengeB64), new TextEncoder().encode(origin)));
+  const nonce = concat(authenticatorData, clientDataHash);
+  const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, keys.privateKey, nonce));
+  return b64(cborEncode({ signature: rawToDer(rawSig), authenticatorData }));
 }
 
 async function getTicket(room) {
   const ch = await post(room, "/attest/challenge");
   expect(ch.status).toBe(200);
-  const attestationObject = await buildAttestation(ch.body.challenge);
+  const { attestationObject, leafKeys } = await buildAttestation(ch.body.challenge);
   const res = await post(room, "/attest", { challenge: ch.body.challenge, attestationObject });
   expect(res.status).toBe(200);
-  return res.body.ticket;
+  return { ticket: res.body.ticket, leafKeys };
+}
+
+// Park a mac, attest+admit a phone, and return its registration token + the
+// attested key (to sign the registration assertion).
+async function attestedAdmit(room) {
+  const { ticket, leafKeys } = await getTicket(room);
+  await admit(room, "mac", () => ({}));
+  const phone = await admit(room, "phone", () => ({ ticket }));
+  expect(phone.result.ok).toBe(true);
+  return { registrationToken: phone.result.registrationToken, leafKeys };
 }
 
 describe("attested-mode admission", () => {
   it("a valid ticket admits the phone, and the mac parks without one", async () => {
     const room = freshRoom();
-    const ticket = await getTicket(room);
+    const { ticket } = await getTicket(room);
     const mac = await admit(room, "mac", () => ({})); // mac cannot attest; parks
     expect(mac.result.ok).toBe(true);
     const phone = await admit(room, "phone", () => ({ ticket }));
@@ -117,7 +152,7 @@ describe("attested-mode admission", () => {
 
   it("a ticket is single-use", async () => {
     const room = freshRoom();
-    const ticket = await getTicket(room);
+    const { ticket } = await getTicket(room);
     await admit(room, "mac", () => ({}));
     expect((await admit(room, "phone", () => ({ ticket }))).result.ok).toBe(true);
     // Reuse: the ticket was consumed.
@@ -126,7 +161,7 @@ describe("attested-mode admission", () => {
 
   it("rejects /attest for a challenge that was never issued", async () => {
     const room = freshRoom();
-    const attestationObject = await buildAttestation(b64(new Uint8Array(32)));
+    const { attestationObject } = await buildAttestation(b64(new Uint8Array(32)));
     const res = await post(room, "/attest", { challenge: b64(new Uint8Array(32)), attestationObject });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe("bad challenge");
@@ -135,7 +170,7 @@ describe("attested-mode admission", () => {
   it("a challenge is single-use", async () => {
     const room = freshRoom();
     const ch = await post(room, "/attest/challenge");
-    const attestationObject = await buildAttestation(ch.body.challenge);
+    const { attestationObject } = await buildAttestation(ch.body.challenge);
     expect((await post(room, "/attest", { challenge: ch.body.challenge, attestationObject })).status).toBe(200);
     // Replaying the same challenge fails (it was deleted on first use).
     const replay = await post(room, "/attest", { challenge: ch.body.challenge, attestationObject });
@@ -145,9 +180,53 @@ describe("attested-mode admission", () => {
   it("rejects an attestation bound to the wrong origin", async () => {
     const room = freshRoom();
     const ch = await post(room, "/attest/challenge");
-    const attestationObject = await buildAttestation(ch.body.challenge, "https://evil.example");
+    const { attestationObject } = await buildAttestation(ch.body.challenge, "https://evil.example");
     const res = await post(room, "/attest", { challenge: ch.body.challenge, attestationObject });
     expect(res.status).toBe(403);
     expect(res.body.error).toBe("attestation rejected");
+  });
+});
+
+describe("attested /register", () => {
+  const VERIFIER = b64(new Uint8Array(32).fill(7));
+  const freshChallenge = async (room) => (await post(room, "/attest/challenge")).body.challenge;
+
+  it("registers with a valid assertion over a fresh challenge", async () => {
+    const room = freshRoom();
+    const { registrationToken, leafKeys } = await attestedAdmit(room);
+    const challenge = await freshChallenge(room);
+    const assertion = await buildAssertion(leafKeys, challenge, { counter: 3 });
+    const res = await post(room, "/register", { registrationToken, verifier: VERIFIER, challenge, assertion });
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+  });
+
+  it("rejects registration with no assertion", async () => {
+    const room = freshRoom();
+    const { registrationToken } = await attestedAdmit(room);
+    const res = await post(room, "/register", { registrationToken, verifier: VERIFIER });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("assertion required");
+  });
+
+  it("rejects an assertion signed by a different key", async () => {
+    const room = freshRoom();
+    const { registrationToken } = await attestedAdmit(room);
+    const challenge = await freshChallenge(room);
+    const otherKeys = await crypto.subtle.generateKey(ALG, false, ["sign", "verify"]);
+    const assertion = await buildAssertion(otherKeys, challenge);
+    const res = await post(room, "/register", { registrationToken, verifier: VERIFIER, challenge, assertion });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("assertion rejected");
+  });
+
+  it("rejects an assertion over a challenge that was never issued", async () => {
+    const room = freshRoom();
+    const { registrationToken, leafKeys } = await attestedAdmit(room);
+    const fake = b64(new Uint8Array(32).fill(9));
+    const assertion = await buildAssertion(leafKeys, fake);
+    const res = await post(room, "/register", { registrationToken, verifier: VERIFIER, challenge: fake, assertion });
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe("bad challenge");
   });
 });

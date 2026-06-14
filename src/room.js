@@ -9,7 +9,7 @@
 //   "admitted"   holds its role slot; frames are spliced to the peer
 
 import { DurableObject } from "cloudflare:workers";
-import { verifyAttestation } from "./appattest.js";
+import { verifyAttestation, verifyAssertion } from "./appattest.js";
 import { APPLE_APP_ATTEST_ROOT_PEM } from "./appleRoot.js";
 
 const PROTOCOL_VERSION = 1;
@@ -348,6 +348,47 @@ export class Room extends DurableObject {
     if (!rec || rec.expiresAt < Date.now()) {
       return json(403, { ok: false, error: "bad token" });
     }
+
+    // Under attestation, registration must ALSO prove CURRENT possession of the
+    // attested key with an assertion over a fresh challenge (the token alone
+    // proves attestation happened at admission; the assertion proves it again,
+    // now, and is replay-bound by the single-use challenge and a strictly
+    // increasing counter). The attested key id is pinned as the registrant.
+    if (attestationRequired(this.env)) {
+      if (!rec.attestKeyId || !rec.attestPublicKey) {
+        return json(403, { ok: false, error: "token not attested" });
+      }
+      if (typeof body.challenge !== "string" || typeof body.assertion !== "string") {
+        return json(403, { ok: false, error: "assertion required" });
+      }
+      const challengeKey = `attestchallenge:${body.challenge}`;
+      const challengeRec = await this.ctx.storage.get(challengeKey);
+      if (!challengeRec || challengeRec.expiresAt < Date.now()) {
+        return json(403, { ok: false, error: "bad challenge" });
+      }
+      await this.ctx.storage.delete(challengeKey); // single-use
+      const clientDataHash = new Uint8Array(await crypto.subtle.digest(
+        "SHA-256", concatBytes(b64ToBytes(body.challenge), new TextEncoder().encode(this.env.RELAY_ORIGIN))));
+      let asserted;
+      try {
+        asserted = await verifyAssertion({
+          assertion: b64ToBytes(body.assertion),
+          clientDataHash,
+          publicKeyRaw: b64ToBytes(rec.attestPublicKey),
+          appId: this.env.APP_ID,
+        });
+      } catch {
+        return json(403, { ok: false, error: "assertion rejected" });
+      }
+      const counterKey = `assertcounter:${rec.attestKeyId}`;
+      const lastCounter = await this.ctx.storage.get(counterKey);
+      if (lastCounter !== undefined && asserted.counter <= lastCounter) {
+        return json(403, { ok: false, error: "stale assertion" });
+      }
+      await this.ctx.storage.put(counterKey, asserted.counter);
+      await this.ctx.storage.put("registrantKeyId", rec.attestKeyId);
+    }
+
     await this.ctx.storage.delete(key); // single-use
     await this.ctx.storage.put("verifier", verifier);
     return json(200, { ok: true });

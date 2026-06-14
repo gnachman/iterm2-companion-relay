@@ -108,6 +108,78 @@ export async function verifyAttestation({
   return { keyId, publicKeyRaw };
 }
 
+// Verify an App Attest ASSERTION (from generateAssertion): proves CURRENT
+// possession of the attested key over a fresh server challenge. Distinct from
+// attestation, no cert chain; the signature is checked against the public key
+// pinned at attestation time. Returns { counter } (the authenticator sign count,
+// which the caller enforces strictly-increasing per key id for replay defence).
+export async function verifyAssertion({
+  assertion,        // raw CBOR { signature: DER ECDSA, authenticatorData }
+  clientDataHash,   // SHA256(challenge || origin)
+  publicKeyRaw,     // 65-byte EC point pinned from the attestation
+  appId,
+}) {
+  let obj;
+  try {
+    obj = cborDecode(asBytes(assertion));
+  } catch (e) {
+    throw new AppAttestError(`malformed assertion CBOR: ${e.message}`);
+  }
+  const signatureDer = obj.signature;
+  const authenticatorData = obj.authenticatorData;
+  if (!(signatureDer instanceof Uint8Array) || !(authenticatorData instanceof Uint8Array)) {
+    throw new AppAttestError("bad assertion shape");
+  }
+  if (authenticatorData.length < 37) throw new AppAttestError("assertion authenticatorData too short");
+
+  // The signature is ECDSA-SHA256 over nonce = SHA256(authenticatorData ||
+  // clientDataHash). WebCrypto wants the IEEE-P1363 (raw r||s) form; App Attest
+  // ships DER, so convert.
+  const nonce = concat(authenticatorData, asBytes(clientDataHash));
+  let key;
+  try {
+    key = await crypto.subtle.importKey(
+      "raw", asBytes(publicKeyRaw), { name: "ECDSA", namedCurve: "P-256" }, false, ["verify"]);
+  } catch (e) {
+    throw new AppAttestError(`pinned key import failed: ${e.message}`);
+  }
+  const rawSig = derEcdsaToRaw(signatureDer, 32);
+  if (!(await crypto.subtle.verify({ name: "ECDSA", hash: "SHA-256" }, key, rawSig, nonce))) {
+    throw new AppAttestError("assertion signature invalid");
+  }
+
+  const rpIdHash = authenticatorData.subarray(0, 32);
+  const expectedRpIdHash = new Uint8Array(
+    await crypto.subtle.digest("SHA-256", new TextEncoder().encode(appId)));
+  if (!equalBytes(rpIdHash, expectedRpIdHash)) throw new AppAttestError("assertion rpIdHash mismatch");
+
+  const counter = (authenticatorData[33] << 24) | (authenticatorData[34] << 16)
+    | (authenticatorData[35] << 8) | authenticatorData[36];
+  return { counter: counter >>> 0 };
+}
+
+// DER ECDSA signature SEQUENCE { INTEGER r, INTEGER s } -> fixed-width r||s.
+function derEcdsaToRaw(der, size) {
+  let pos = 0;
+  if (der[pos++] !== 0x30) throw new AppAttestError("signature: expected SEQUENCE");
+  ({ pos } = readDerLength(der, pos));
+  const readInt = () => {
+    if (der[pos++] !== 0x02) throw new AppAttestError("signature: expected INTEGER");
+    let len;
+    ({ len, pos } = readDerLength(der, pos));
+    let val = der.subarray(pos, pos + len);
+    pos += len;
+    while (val.length > size && val[0] === 0x00) val = val.subarray(1); // drop sign-padding
+    if (val.length > size) throw new AppAttestError("signature: integer too large");
+    const out = new Uint8Array(size);
+    out.set(val, size - val.length);
+    return out;
+  };
+  const r = readInt();
+  const s = readInt();
+  return concat(r, s);
+}
+
 // The credCert nonce extension is DER: SEQUENCE { [1] EXPLICIT OCTET STRING }.
 function parseNonceExtension(der) {
   let pos = 0;

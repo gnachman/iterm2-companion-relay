@@ -9,6 +9,7 @@
 //   "admitted"   holds its role slot; frames are spliced to the peer
 
 import { DurableObject } from "cloudflare:workers";
+import { verifyAttestation } from "./appattest.js";
 
 const PROTOCOL_VERSION = 1;
 const NONCE_BYTES = 32;
@@ -16,6 +17,12 @@ const ROLE_BYTE = { mac: 1, phone: 2 };
 // A registration token lives only long enough for the phone to make its
 // follow-up /register call within the same confirmed session.
 const REG_TOKEN_TTL_MS = 5 * 60 * 1000;
+// Attestation challenges and the pairing-room tickets they yield are both
+// short-lived and single-use; the challenge cap keeps issuance from being a
+// storage-fill vector.
+const ATTEST_CHALLENGE_TTL_MS = 5 * 60 * 1000;
+const TICKET_TTL_MS = 5 * 60 * 1000;
+const MAX_OUTSTANDING_CHALLENGES = 16;
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -39,6 +46,13 @@ function b64(bytes) {
 
 function b64ToBytes(s) {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
+}
+
+function concatBytes(a, b) {
+  const out = new Uint8Array(a.length + b.length);
+  out.set(a, 0);
+  out.set(b, a.length);
+  return out;
 }
 
 // The bytes a join signs, identical to Swift's RelayJoin.transcript:
@@ -79,7 +93,13 @@ export class Room extends DurableObject {
       if (request.method === "POST" && url.pathname === "/register") {
         return this.handleRegister(request);
       }
-      // attest, delete are added in later slices.
+      if (request.method === "POST" && url.pathname === "/attest/challenge") {
+        return this.handleAttestChallenge();
+      }
+      if (request.method === "POST" && url.pathname === "/attest") {
+        return this.handleAttest(request);
+      }
+      // delete is added in a later slice.
       return new Response("not implemented", { status: 501 });
     }
     const pair = new WebSocketPair();
@@ -151,15 +171,31 @@ export class Room extends DurableObject {
     }
 
     if (attestationRequired(this.env)) {
-      // Pairing ticket verification arrives in a later slice.
-      return this.reject(ws, "attestation required");
+      // Pairing mode under attestation. The mac cannot attest (no App Attest off
+      // the Mac App Store), so it parks pre-auth; its legitimacy is the Noise
+      // handshake (it alone holds the static private key the phone pinned from
+      // the QR). The phone must present a valid, single-use ticket it earned by
+      // attesting over /attest.
+      if (att.role === "mac") {
+        return this.admit(ws, att.role);
+      }
+      if (typeof proof.ticket !== "string") {
+        return this.reject(ws, "ticket required");
+      }
+      const ticketKey = `ticket:${proof.ticket}`;
+      const ticketRec = await this.ctx.storage.get(ticketKey);
+      if (!ticketRec || ticketRec.expiresAt < Date.now()) {
+        return this.reject(ws, "bad ticket");
+      }
+      await this.ctx.storage.delete(ticketKey); // single-use
+      return this.admit(ws, att.role, { keyId: ticketRec.keyId, publicKey: ticketRec.publicKey });
     }
     // Open-mode pairing: admit on connect (the documented degradation; bounded
     // by the per-park cycle cap and SAS confirmation, added later).
     return this.admit(ws, att.role);
   }
 
-  async admit(ws, role) {
+  async admit(ws, role, attest = null) {
     // A phone may only join while a mac is parked. Otherwise its Noise
     // handshake would be sent into an empty room and silently dropped, and it
     // would sit on a handshake timeout. Reject instead, so the phone retries
@@ -198,10 +234,92 @@ export class Room extends DurableObject {
       // register its verifier. Bound to this room (it lives in this DO's
       // storage) and short-lived.
       const token = b64(crypto.getRandomValues(new Uint8Array(24)));
-      await this.ctx.storage.put(`regtoken:${token}`, { expiresAt: Date.now() + REG_TOKEN_TTL_MS });
+      const rec = { expiresAt: Date.now() + REG_TOKEN_TTL_MS };
+      // Carry the attested key id so first registration can pin it (the phone
+      // earned the ticket by attesting; the registration inherits that identity).
+      if (attest) {
+        rec.attestKeyId = attest.keyId;
+        rec.attestPublicKey = attest.publicKey;
+      }
+      await this.ctx.storage.put(`regtoken:${token}`, rec);
       result.registrationToken = token;
     }
     ws.send(JSON.stringify(result));
+  }
+
+  // Issue a single-use attestation challenge (App Attest needs a server nonce
+  // to bind the clientDataHash). Capped + TTL'd so issuance isn't a storage
+  // fill vector. No attestation needed to ASK for a challenge.
+  async handleAttestChallenge() {
+    const now = Date.now();
+    let live = 0;
+    for (const [key, rec] of await this.ctx.storage.list({ prefix: "attestchallenge:" })) {
+      if (rec.expiresAt < now) {
+        await this.ctx.storage.delete(key);
+      } else {
+        live += 1;
+      }
+    }
+    if (live >= MAX_OUTSTANDING_CHALLENGES) {
+      return json(429, { ok: false, error: "too many outstanding challenges" });
+    }
+    const challenge = b64(crypto.getRandomValues(new Uint8Array(NONCE_BYTES)));
+    await this.ctx.storage.put(`attestchallenge:${challenge}`, { expiresAt: now + ATTEST_CHALLENGE_TTL_MS });
+    return json(200, { ok: true, challenge });
+  }
+
+  // Verify an App Attest attestation over a previously issued challenge and, on
+  // success, mint a single-use pairing-room ticket bound to the attested key id
+  // (and to this room, since it lives in this DO). The phone presents the ticket
+  // in its WebSocket Proof to take the phone slot.
+  async handleAttest(request) {
+    if (!attestationRequired(this.env)) {
+      return json(400, { ok: false, error: "attestation disabled" });
+    }
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return json(400, { ok: false, error: "bad json" });
+    }
+    const { challenge, attestationObject } = body;
+    if (typeof challenge !== "string" || typeof attestationObject !== "string") {
+      return json(400, { ok: false, error: "missing fields" });
+    }
+    const challengeKey = `attestchallenge:${challenge}`;
+    const challengeRec = await this.ctx.storage.get(challengeKey);
+    if (!challengeRec || challengeRec.expiresAt < Date.now()) {
+      return json(403, { ok: false, error: "bad challenge" });
+    }
+    await this.ctx.storage.delete(challengeKey); // single-use
+
+    // clientDataHash = SHA256(challenge bytes || origin), the same value the
+    // phone attested over. Origin binding stops a hostile relay from proxying a
+    // genuine challenge from the official relay.
+    const origin = this.env.RELAY_ORIGIN;
+    const clientDataHash = new Uint8Array(await crypto.subtle.digest(
+      "SHA-256", concatBytes(b64ToBytes(challenge), new TextEncoder().encode(origin))));
+
+    let attested;
+    try {
+      attested = await verifyAttestation({
+        attestationObject: b64ToBytes(attestationObject),
+        clientDataHash,
+        appId: this.env.APP_ID,
+        environment: this.env.APPATTEST_ENV,
+        trustedRootPem: this.env.APPATTEST_ROOT_PEM,
+      });
+    } catch {
+      return json(403, { ok: false, error: "attestation rejected" });
+    }
+
+    const ticket = b64(crypto.getRandomValues(new Uint8Array(24)));
+    await this.ctx.storage.put(`ticket:${ticket}`, {
+      expiresAt: Date.now() + TICKET_TTL_MS,
+      keyId: b64(attested.keyId),
+      publicKey: b64(attested.publicKeyRaw),
+    });
+    return json(200, { ok: true, ticket });
   }
 
   async handleRegister(request) {

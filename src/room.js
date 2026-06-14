@@ -106,17 +106,12 @@ export class Room extends DurableObject {
   async fetch(request) {
     if (request.headers.get("Upgrade") !== "websocket") {
       const url = new URL(request.url);
-      if (request.method === "POST" && url.pathname === "/register") {
-        return this.handleRegister(request);
-      }
-      if (request.method === "POST" && url.pathname === "/attest/challenge") {
-        return this.handleAttestChallenge();
-      }
-      if (request.method === "POST" && url.pathname === "/attest") {
-        return this.handleAttest(request);
-      }
-      // delete is added in a later slice.
-      return new Response("not implemented", { status: 501 });
+      const res = await this.handleHttp(request, url);
+      // One explicit line per HTTP request (auto invocation logs are off), so
+      // /attest and /register stay visible. Identified by the opaque room tag.
+      const tag = await roomTag(request.headers.get("x-relay-room"));
+      console.log(`relay ${tag} ${request.method} ${url.pathname} -> ${res.status}`);
+      return res;
     }
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -132,6 +127,20 @@ export class Room extends DurableObject {
     server.serializeAttachment({ state: "hello", roomName, tag });
     console.log(`relay ${tag} connect`);
     return new Response(null, { status: 101, webSocket: client });
+  }
+
+  async handleHttp(request, url) {
+    if (request.method === "POST" && url.pathname === "/register") {
+      return this.handleRegister(request);
+    }
+    if (request.method === "POST" && url.pathname === "/attest/challenge") {
+      return this.handleAttestChallenge();
+    }
+    if (request.method === "POST" && url.pathname === "/attest") {
+      return this.handleAttest(request);
+    }
+    // delete is added in a later slice.
+    return new Response("not implemented", { status: 501 });
   }
 
   async webSocketMessage(ws, message) {

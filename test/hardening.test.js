@@ -11,21 +11,17 @@ import { describe, it, expect } from "vitest";
 import { SELF, env, runInDurableObject } from "cloudflare:test";
 import {
   openSocket, admit, admitSigned, closed, freshRoom,
-  makeJoinKey, signB64, seedVerifier, transcript, ORIGIN,
+  makeJoinKey, signB64, seedVerifier, transcript, canonicalEncode, ORIGIN,
 } from "./helpers.js";
 
 const b64ToBytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-// Mirrors the worker's deleteTranscript: [version=1, op=0] || challenge ||
-// roomName || origin. Op byte 0 (vs join roles 1/2) domain-separates a delete.
+// Mirrors the worker's deleteTranscript: the "delete" domain (vs "join")
+// domain-separates a deletion from a join signature.
 function deleteTranscript(challengeB64, roomName, origin = ORIGIN) {
   const enc = new TextEncoder();
-  const head = new Uint8Array([1, 0]);
-  const parts = [head, b64ToBytes(challengeB64), enc.encode(roomName), enc.encode(origin)];
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let o = 0;
-  for (const p of parts) { out.set(p, o); o += p.length; }
-  return out;
+  return canonicalEncode("iterm2-relay-delete",
+    [b64ToBytes(challengeB64), enc.encode(roomName), enc.encode(origin)]);
 }
 
 async function getChallenge(room) {

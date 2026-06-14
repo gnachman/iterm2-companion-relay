@@ -10,7 +10,7 @@ import { SELF } from "cloudflare:test";
 import * as x509 from "@peculiar/x509";
 import { encode as cborEncode } from "../src/cbor.js";
 import { TEST_ROOT_PEM, testRootSigningKey } from "./fixtures/testRoot.js";
-import { admit, next, freshRoom, ORIGIN } from "./helpers.js";
+import { admit, next, freshRoom, canonicalEncode, ORIGIN } from "./helpers.js";
 
 const ALG = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
 const APP_ID = "TEAMID12.com.example.app";
@@ -62,7 +62,7 @@ async function buildAttestation(challengeB64, origin = ORIGIN) {
   const authData = concat(
     rpIdHash, new Uint8Array([0x40]), new Uint8Array([0, 0, 0, 0]),
     aaguid, new Uint8Array([0, keyId.length]), keyId);
-  const clientDataHash = await sha256(concat(b64ToBytes(challengeB64), new TextEncoder().encode(origin)));
+  const clientDataHash = await sha256(canonicalEncode("iterm2-relay-attest", [b64ToBytes(challengeB64), new TextEncoder().encode(origin)]));
   const nonce = await sha256(concat(authData, clientDataHash));
   const leaf = await x509.X509CertificateGenerator.create({
     serialNumber: "03", subject: "CN=Leaf", issuer: intermediate.subject,
@@ -97,7 +97,7 @@ async function buildAssertion(keys, challengeB64, { appId = APP_ID, counter = 1,
   const counterBytes = new Uint8Array([
     (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff]);
   const authenticatorData = concat(rpIdHash, new Uint8Array([0x00]), counterBytes);
-  const clientDataHash = await sha256(concat(b64ToBytes(challengeB64), new TextEncoder().encode(origin)));
+  const clientDataHash = await sha256(canonicalEncode("iterm2-relay-attest", [b64ToBytes(challengeB64), new TextEncoder().encode(origin)]));
   const nonce = concat(authenticatorData, clientDataHash);
   const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, keys.privateKey, nonce));
   return b64(cborEncode({ signature: rawToDer(rawSig), authenticatorData }));

@@ -94,20 +94,38 @@ function concatBytes(a, b) {
   return out;
 }
 
-// The bytes a join signs, identical to Swift's RelayJoin.transcript:
-// [version, roleByte] || nonce || roomName(utf8) || origin(utf8).
-function joinTranscript(role, nonceB64, roomName, origin) {
-  const nonce = b64ToBytes(nonceB64);
-  const enc = new TextEncoder();
-  const head = new Uint8Array([PROTOCOL_VERSION, ROLE_BYTE[role]]);
-  const parts = [head, nonce, enc.encode(roomName), enc.encode(origin)];
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
+// Unambiguous, domain-separated encoding, byte-identical to Swift's
+// CanonicalEncoding.encode: len32be(domain) || domain || for each field
+// len32be(field) || field. A leading domain string plus per-element 4-byte
+// big-endian length prefixes make distinct field tuples impossible to confuse.
+// `fields` are Uint8Array; `domain` is a string.
+function canonicalEncode(domain, fields) {
+  const elems = [new TextEncoder().encode(domain), ...fields];
+  let total = 0;
+  for (const e of elems) total += 4 + e.length;
+  const out = new Uint8Array(total);
   let o = 0;
-  for (const p of parts) {
-    out.set(p, o);
-    o += p.length;
+  for (const e of elems) {
+    out[o++] = (e.length >>> 24) & 0xff;
+    out[o++] = (e.length >>> 16) & 0xff;
+    out[o++] = (e.length >>> 8) & 0xff;
+    out[o++] = e.length & 0xff;
+    out.set(e, o);
+    o += e.length;
   }
   return out;
+}
+
+// The bytes a join signs, identical to Swift's RelayJoin.transcript:
+// canonical("iterm2-relay-join", [roleByte, nonce, roomName, origin]).
+function joinTranscript(role, nonceB64, roomName, origin) {
+  const enc = new TextEncoder();
+  return canonicalEncode("iterm2-relay-join", [
+    new Uint8Array([ROLE_BYTE[role]]),
+    b64ToBytes(nonceB64),
+    enc.encode(roomName),
+    enc.encode(origin),
+  ]);
 }
 
 async function verifyJoin(sigB64, transcriptBytes, verifierB64) {
@@ -125,22 +143,17 @@ async function verifyJoin(sigB64, transcriptBytes, verifierB64) {
   }
 }
 
-// (4) The bytes a room-deletion request signs. Distinct from a join transcript
-// (which carries role byte 1=mac or 2=phone): op byte 0 marks a delete, so a
-// captured join signature can never be replayed to authorize a deletion. Bound
-// to a fresh single-use challenge (anti-replay), the room name, and the origin.
+// (4) The bytes a room-deletion request signs. The distinct "delete" domain
+// (vs "join") means a captured join signature can never be replayed to
+// authorize a deletion. Bound to a fresh single-use challenge (anti-replay),
+// the room name, and the origin.
 function deleteTranscript(challengeB64, roomName, origin) {
-  const challenge = b64ToBytes(challengeB64);
   const enc = new TextEncoder();
-  const head = new Uint8Array([PROTOCOL_VERSION, 0]);
-  const parts = [head, challenge, enc.encode(roomName), enc.encode(origin)];
-  const out = new Uint8Array(parts.reduce((n, p) => n + p.length, 0));
-  let o = 0;
-  for (const p of parts) {
-    out.set(p, o);
-    o += p.length;
-  }
-  return out;
+  return canonicalEncode("iterm2-relay-delete", [
+    b64ToBytes(challengeB64),
+    enc.encode(roomName),
+    enc.encode(origin),
+  ]);
 }
 
 function safeAttachment(ws) {
@@ -434,12 +447,14 @@ export class Room extends DurableObject {
     }
     await this.ctx.storage.delete(challengeKey); // single-use
 
-    // clientDataHash = SHA256(challenge bytes || origin), the same value the
-    // phone attested over. Origin binding stops a hostile relay from proxying a
-    // genuine challenge from the official relay.
+    // clientDataHash = SHA256(canonical("iterm2-relay-attest",
+    // [challengeBytes, origin])), the same value the phone attested over. Origin
+    // binding stops a hostile relay from proxying a genuine challenge from the
+    // official relay.
     const origin = this.env.RELAY_ORIGIN;
-    const clientDataHash = new Uint8Array(await crypto.subtle.digest(
-      "SHA-256", concatBytes(b64ToBytes(challenge), new TextEncoder().encode(origin))));
+    const clientDataHash = new Uint8Array(await crypto.subtle.digest("SHA-256",
+      canonicalEncode("iterm2-relay-attest",
+        [b64ToBytes(challenge), new TextEncoder().encode(origin)])));
 
     let attested;
     try {
@@ -513,8 +528,9 @@ export class Room extends DurableObject {
         return json(403, { ok: false, error: "bad challenge" });
       }
       await this.ctx.storage.delete(challengeKey); // single-use
-      const clientDataHash = new Uint8Array(await crypto.subtle.digest(
-        "SHA-256", concatBytes(b64ToBytes(body.challenge), new TextEncoder().encode(this.env.RELAY_ORIGIN))));
+      const clientDataHash = new Uint8Array(await crypto.subtle.digest("SHA-256",
+        canonicalEncode("iterm2-relay-attest",
+          [b64ToBytes(body.challenge), new TextEncoder().encode(this.env.RELAY_ORIGIN)])));
       let asserted;
       try {
         asserted = await verifyAssertion({

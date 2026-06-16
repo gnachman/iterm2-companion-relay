@@ -21,6 +21,7 @@ export default defineWorkersConfig({
             APP_ID: "TEAMID12.com.example.app",
             APPATTEST_ENV: "production",
             APPATTEST_ROOT_PEM: TEST_ROOT_PEM,
+            RELAY_LOG: "true",
           },
         },
       },

@@ -4,16 +4,13 @@
   "name": "iterm2-companion-relay",
   "main": "src/index.js",
   "compatibility_date": "2025-09-06",
-  // Retain console logs so the admission control-plane is debuggable in
-  // production (Workers Logs in the dashboard), not just via live `wrangler
-  // tail`. The relay sees only ciphertext and logs an opaque room tag, so no
-  // payload or rendezvous secret is captured. invocation_logs is off: the
-  // automatic per-invocation rows double every request (entry Worker + DO) and
-  // emit one row per forwarded ciphertext frame ("Unknown Event"), which is
-  // noise; the explicit console.log lines carry all the useful control plane.
+  // Observability OFF: the relay retains no logs at all (privacy / GDPR). The
+  // diagnostic console lines are gated behind the RELAY_LOG env var (off in
+  // production) and route through Room.dlog, so nothing is emitted or stored.
+  // Explicitly false rather than omitted, so the platform default cannot turn
+  // it back on.
   "observability": {
-    "enabled": true,
-    "logs": { "invocation_logs": false }
+    "enabled": false
   },
   "durable_objects": {
     "bindings": [

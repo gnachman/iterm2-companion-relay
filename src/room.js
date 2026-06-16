@@ -186,6 +186,16 @@ export class Room extends DurableObject {
     this.quotaFlushedBytes = 0;
   }
 
+  // Diagnostic logging is OFF by default: production retains and emits nothing
+  // (no log retention, no personal data, for GDPR comfort). Set the RELAY_LOG
+  // env var to "true" to stream these lines to `wrangler tail` while debugging;
+  // even then nothing is retained, observability is disabled.
+  dlog(...args) {
+    if (this.env.RELAY_LOG === "true") {
+      console.log(...args);
+    }
+  }
+
   // (5) Per-room daily byte quota. Accumulates relayed bytes; once the room has
   // relayed more than the quota within the current 24h window it tears the room
   // down (closes every socket) and returns true. The window rolls every 24h.
@@ -204,7 +214,7 @@ export class Room extends DurableObject {
     this.quota.bytes += size;
     if (this.quota.bytes > limit) {
       await this.ctx.storage.put("quota", this.quota);
-      console.log(`relay ${tagOf(att)} daily byte quota exceeded (${this.quota.bytes} > ${limit}); closing room`);
+      this.dlog(`relay ${tagOf(att)} daily byte quota exceeded (${this.quota.bytes} > ${limit}); closing room`);
       for (const sock of this.ctx.getWebSockets()) {
         try { sock.close(1008, "daily quota exceeded"); } catch { /* ignore */ }
       }
@@ -236,7 +246,7 @@ export class Room extends DurableObject {
       // One explicit line per HTTP request (auto invocation logs are off), so
       // /attest and /register stay visible. Identified by the opaque room tag.
       const tag = await roomTag(request.headers.get("x-relay-room"));
-      console.log(`relay ${tag} ${request.method} ${url.pathname} -> ${res.status}`);
+      this.dlog(`relay ${tag} ${request.method} ${url.pathname} -> ${res.status}`);
       return res;
     }
     const pair = new WebSocketPair();
@@ -254,7 +264,7 @@ export class Room extends DurableObject {
     // (1) Bound simultaneous un-admitted sockets, and arm the deadline sweep.
     this.evictExcessPreAuth(tag);
     await this.ensureAlarm();
-    console.log(`relay ${tag} connect`);
+    this.dlog(`relay ${tag} connect`);
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -281,7 +291,7 @@ export class Room extends DurableObject {
     const size = typeof message === "string" ? message.length : message.byteLength;
     const cap = att.state === "admitted" ? MAX_FRAME_BYTES : MAX_CONTROL_BYTES;
     if (size > cap) {
-      console.log(`relay ${tagOf(att)} frame too large (${size} > ${cap}); closing`);
+      this.dlog(`relay ${tagOf(att)} frame too large (${size} > ${cap}); closing`);
       try { ws.close(1009, "frame too large"); } catch { /* ignore */ }
       return;
     }
@@ -293,7 +303,7 @@ export class Room extends DurableObject {
       case "admitted":
         // (3) Cap spliced frame rate per room.
         if (this.rateLimited(this.frameWindow, MAX_FRAMES_PER_WINDOW, FRAME_WINDOW_MS)) {
-          console.log(`relay ${tagOf(att)} frame rate exceeded; closing`);
+          this.dlog(`relay ${tagOf(att)} frame rate exceeded; closing`);
           try { ws.close(1008, "frame rate exceeded"); } catch { /* ignore */ }
           return;
         }
@@ -327,7 +337,7 @@ export class Room extends DurableObject {
       roomName: att.roomName,
       tag: att.tag,
     });
-    console.log(`relay ${tagOf(att)} hello role=${hello.role} -> challenged`);
+    this.dlog(`relay ${tagOf(att)} hello role=${hello.role} -> challenged`);
     ws.send(JSON.stringify({ nonce: b64(nonce) }));
   }
 
@@ -413,7 +423,7 @@ export class Room extends DurableObject {
       if (other === ws) continue;
       const a = other.deserializeAttachment();
       if (a && a.state === "admitted" && a.role === role) {
-        console.log(`relay ${tagOf(prev)} displacing existing ${role}`);
+        this.dlog(`relay ${tagOf(prev)} displacing existing ${role}`);
         other.close(1000, "displaced");
       }
     }
@@ -425,7 +435,7 @@ export class Room extends DurableObject {
       const a = s.deserializeAttachment();
       return a && a.state === "admitted" && a.role !== role;
     });
-    console.log(`relay ${tagOf(prev)} admit role=${role} via=${via} peer=${peerPresent}`
+    this.dlog(`relay ${tagOf(prev)} admit role=${role} via=${via} peer=${peerPresent}`
       + (peerPresent ? " (spliced)" : ""));
     const result = { ok: true };
     if (role === "phone") {
@@ -517,7 +527,7 @@ export class Room extends DurableObject {
       // `wrangler tail` reveals which check failed during device testing. The
       // body stays generic, since the client cannot act on the detail. The
       // attestation is opaque to the relay, so the message leaks nothing.
-      console.warn("attest rejected:", e?.message);
+      this.dlog("attest rejected:", e?.message);
       return json(403, { ok: false, error: "attestation rejected" });
     }
 
@@ -630,7 +640,7 @@ export class Room extends DurableObject {
     if (!(await verifyJoin(body.signature, transcript, verifier))) {
       return json(403, { ok: false, error: "bad signature" });
     }
-    console.log(`relay ${await roomTag(roomName)} DELETE authorized; wiping room`);
+    this.dlog(`relay ${await roomTag(roomName)} DELETE authorized; wiping room`);
     for (const ws of this.ctx.getWebSockets()) {
       try {
         ws.close(1000, "room deleted");
@@ -650,7 +660,7 @@ export class Room extends DurableObject {
       .filter(({ a }) => a && a.state !== "admitted")
       .sort((x, y) => (x.a.connectedAt || 0) - (y.a.connectedAt || 0));
     for (let i = 0; i < preAuth.length - MAX_PREAUTH_SOCKETS; i++) {
-      console.log(`relay ${tag} evicting oldest pre-auth socket (cap ${MAX_PREAUTH_SOCKETS})`);
+      this.dlog(`relay ${tag} evicting oldest pre-auth socket (cap ${MAX_PREAUTH_SOCKETS})`);
       try {
         preAuth[i].ws.close(1008, "too many pending");
       } catch {
@@ -676,7 +686,7 @@ export class Room extends DurableObject {
       const a = safeAttachment(ws);
       if (!a || a.state === "admitted") continue;
       if (a.connectedAt && now - a.connectedAt > PREAUTH_DEADLINE_MS) {
-        console.log(`relay ${tagOf(a)} pre-auth socket timed out; closing`);
+        this.dlog(`relay ${tagOf(a)} pre-auth socket timed out; closing`);
         try {
           ws.close(1008, "admission timeout");
         } catch {
@@ -718,7 +728,7 @@ export class Room extends DurableObject {
     } catch {
       // ignore
     }
-    console.log(`relay ${tagOf(att)} reject role=${att?.role ?? "?"}: ${error}`);
+    this.dlog(`relay ${tagOf(att)} reject role=${att?.role ?? "?"}: ${error}`);
     try {
       ws.send(JSON.stringify({ ok: false, error }));
     } catch {
@@ -742,7 +752,7 @@ export class Room extends DurableObject {
   async webSocketClose(ws, code, reason) {
     let att;
     try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
-    console.log(`relay ${tagOf(att)} close role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
+    this.dlog(`relay ${tagOf(att)} close role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
       + `code=${code ?? "?"}${reason ? ` reason=${reason}` : ""}`);
     this.closePeerOf(ws);
   }
@@ -750,7 +760,7 @@ export class Room extends DurableObject {
   async webSocketError(ws) {
     let att;
     try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
-    console.log(`relay ${tagOf(att)} socket error role=${att?.role ?? "?"} state=${att?.state ?? "?"}`);
+    this.dlog(`relay ${tagOf(att)} socket error role=${att?.role ?? "?"} state=${att?.state ?? "?"}`);
     this.closePeerOf(ws);
   }
 
@@ -771,7 +781,7 @@ export class Room extends DurableObject {
       if (peer === ws) continue;
       const a = peer.deserializeAttachment();
       if (a && a.state === "admitted" && a.role !== att.role) {
-        console.log(`relay ${tagOf(att)} peer gone (role=${att.role}); closing ${a.role}`);
+        this.dlog(`relay ${tagOf(att)} peer gone (role=${att.role}); closing ${a.role}`);
         try {
           peer.close(1001, "peer gone");
         } catch {

@@ -42,6 +42,34 @@
     "APPATTEST_ENV": "production",
     // This relay's canonical origin, bound into join transcripts and the
     // App Attest clientDataHash. Must be the deployed origin.
-    "RELAY_ORIGIN": "https://iterm2-companion-relay.gnachman.workers.dev"
+    "RELAY_ORIGIN": "https://companion-relay.iterm2.com",
+    // Established-room idle TTL in ms (default 30 days if unset/invalid). An
+    // established room unused for this long is deleted, bounding how long an
+    // abandoned pairing's pseudonym, verifier, and attest key id persist. A live
+    // pairing re-parks on every contact, so any in-use pairing is kept alive; a
+    // device returning after a reap re-pairs. 30 days = 2592000000.
+    "RELAY_ESTABLISHED_IDLE_TTL_MS": "2592000000"
+  },
+  // Per-IP rate limiters applied in the entry Worker (src/index.js) before a
+  // request can instantiate a Durable Object. These bound the two abuse vectors
+  // per client IP: attestation (CPU-heavy crypto) tightly, and the WebSocket
+  // upgrade (connection flood) more loosely (sized for legitimate reconnect
+  // retries). Per-datacenter soft limits; the IP is only the limiter key, never
+  // logged. `period` supports 10 or 60 seconds only. Tune limits here + redeploy.
+  "unsafe": {
+    "bindings": [
+      {
+        "name": "ATTEST_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "2001",
+        "simple": { "limit": 30, "period": 60 }
+      },
+      {
+        "name": "WS_LIMITER",
+        "type": "ratelimit",
+        "namespace_id": "2002",
+        "simple": { "limit": 120, "period": 60 }
+      }
+    ]
   }
 }

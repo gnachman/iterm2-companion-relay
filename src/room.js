@@ -37,6 +37,15 @@ const PREAUTH_DEADLINE_MS = 15 * 1000;
 //     only happens when the room is idle, i.e. not under attack).
 const ADMISSION_WINDOW_MS = 10 * 1000;
 const MAX_ADMISSION_ATTEMPTS = 40;
+// (2b) SAS-grind cap: a photographed-QR attacker can reconnect to a pairing room
+//     and re-handshake to grind the ~20-bit SAS. Bound how many phone
+//     handshake/displacement cycles ONE mac park tolerates before the room is
+//     killed (which forces the Mac to mint a fresh pid the stale photo no longer
+//     matches). Counted per mac PARK, not per QR: a fresh mac park resets it, so
+//     a confirmed-but-not-established Mac re-parking and the legitimate phone
+//     retrying during a Mac restart keep their own budget. Pairing mode only;
+//     established rooms admit by signature and are exempt.
+const MAX_PAIRING_CYCLES = 8;
 // (3) Splice abuse: cap spliced frame size and rate. Noise transport messages
 //     are <= 65535 bytes; control frames (hello/proof) are tiny.
 const MAX_FRAME_BYTES = 256 * 1024;
@@ -55,6 +64,15 @@ const QUOTA_FLUSH_BYTES = 4 * 1024 * 1024;
 //     sit idle before its leftover state is reclaimed.
 const HOUSEKEEPING_INTERVAL_MS = 15 * 1000;
 const EPHEMERAL_PREFIXES = ["ticket:", "regtoken:", "attestchallenge:"];
+// (4) Established-room idle TTL: a successful pairing's room is reusable as long
+//     as it is used, but delete-room at unpair is best-effort (it cannot reach
+//     the relay for an offline unpair, a wiped device, or a deleted app), so an
+//     UNUSED established room is deleted after this idle window, bounding how long
+//     an abandoned pairing's pseudonym, verifier, and attest key id persist. A
+//     live pairing re-parks/re-registers on every contact (which bumps
+//     lastActivity), so the TTL never reaps a room in active use; a device that
+//     returns after a reap re-pairs. Override with RELAY_ESTABLISHED_IDLE_TTL_MS.
+const DEFAULT_ESTABLISHED_IDLE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
 
 function json(status, obj) {
   return new Response(JSON.stringify(obj), {
@@ -365,6 +383,9 @@ export class Room extends DurableObject {
       if (!(await verifyJoin(proof.sig, transcript, verifier))) {
         return this.reject(ws, "bad signature");
       }
+      // An authenticated reconnect proves the pairing is still live; refresh the
+      // idle-TTL window so an in-use room is never reaped.
+      await this.bumpActivity();
       return this.admit(ws, att.role, null, "signed");
     }
 
@@ -395,6 +416,13 @@ export class Room extends DurableObject {
 
   async admit(ws, role, attest = null, via = "?") {
     const prev = ws.deserializeAttachment() || {};
+    // (2b) Pairing-room cycle cap (anti-SAS-grind), pairing mode only. A fresh
+    // mac park resets the budget; the per-phone spend is charged below, once the
+    // mac-parked check confirms this is a real handshake cycle.
+    const established = !!(await this.ctx.storage.get("verifier"));
+    if (!established && role === "mac") {
+      await this.ctx.storage.put("pairingCycles", 0);
+    }
     // A phone may only join while a mac is parked. Otherwise its Noise
     // handshake would be sent into an empty room and silently dropped, and it
     // would sit on a handshake timeout. Reject instead, so the phone retries
@@ -408,6 +436,17 @@ export class Room extends DurableObject {
       });
       if (!macParked) {
         return this.reject(ws, "mac offline");
+      }
+      // A real handshake/displacement cycle (mac is present): charge the park's
+      // budget and kill the room if grinding has blown past the cap.
+      if (!established) {
+        const cycles = ((await this.ctx.storage.get("pairingCycles")) || 0) + 1;
+        if (cycles > MAX_PAIRING_CYCLES) {
+          this.dlog(`relay ${tagOf(prev)} pairing cycle cap exceeded (${cycles}); killing room`);
+          await this.teardownRoom("pairing cycle cap");
+          return;
+        }
+        await this.ctx.storage.put("pairingCycles", cycles);
       }
     }
     // Two slots, newest-wins: displace any current holder of this role. Do NOT
@@ -610,6 +649,9 @@ export class Room extends DurableObject {
 
     await this.ctx.storage.delete(key); // single-use
     await this.ctx.storage.put("verifier", verifier);
+    // The room is now established; start its idle-TTL window and arm the alarm
+    // that enforces it.
+    await this.bumpActivity();
     return json(200, { ok: true });
   }
 
@@ -641,15 +683,23 @@ export class Room extends DurableObject {
       return json(403, { ok: false, error: "bad signature" });
     }
     this.dlog(`relay ${await roomTag(roomName)} DELETE authorized; wiping room`);
+    await this.teardownRoom("room deleted");
+    return json(200, { ok: true });
+  }
+
+  // Disconnect both sides and wipe ALL room state, including any pending alarm,
+  // so nothing (pseudonym, verifier, attest key id) survives. Shared by the
+  // signed delete-room path and the idle-TTL sweep.
+  async teardownRoom(reason) {
     for (const ws of this.ctx.getWebSockets()) {
       try {
-        ws.close(1000, "room deleted");
+        ws.close(1000, reason);
       } catch {
         // ignore
       }
     }
     await this.ctx.storage.deleteAll();
-    return json(200, { ok: true });
+    await this.ctx.storage.deleteAlarm();
   }
 
   // (1) Drop the oldest un-admitted sockets over the cap, so a loiterer flood
@@ -669,16 +719,38 @@ export class Room extends DurableObject {
     }
   }
 
-  // Arm the housekeeping alarm if one is not already pending.
+  // Guarantee a housekeeping wake within HOUSEKEEPING_INTERVAL_MS. An
+  // established room parks a far-future idle-TTL alarm; left alone that would
+  // starve the short-cadence pre-auth/ephemeral sweeps, so pull the alarm in
+  // when it sits past the housekeeping horizon. The alarm handler reschedules to
+  // the idle deadline once the near-term work drains.
   async ensureAlarm() {
-    if ((await this.ctx.storage.getAlarm()) === null) {
-      await this.ctx.storage.setAlarm(Date.now() + HOUSEKEEPING_INTERVAL_MS);
+    const soon = Date.now() + HOUSEKEEPING_INTERVAL_MS;
+    const existing = await this.ctx.storage.getAlarm();
+    if (existing === null || existing > soon) {
+      await this.ctx.storage.setAlarm(soon);
     }
   }
 
-  // Housekeeping: (1) close pre-auth sockets past the admission deadline, and
-  // (4) prune expired ephemeral state. Reschedules only while there is
-  // something left to watch, so an idle/established room lets the DO hibernate.
+  // Record a live-pairing signal (registration or an authenticated reconnect)
+  // and make sure an alarm is pending so the idle TTL is eventually enforced.
+  async bumpActivity() {
+    await this.ctx.storage.put("lastActivity", Date.now());
+    await this.ensureAlarm();
+  }
+
+  // The established-room idle TTL, overridable via env for tuning/tests.
+  establishedIdleTtlMs() {
+    const v = Number(this.env.RELAY_ESTABLISHED_IDLE_TTL_MS);
+    return Number.isFinite(v) && v > 0 ? v : DEFAULT_ESTABLISHED_IDLE_TTL_MS;
+  }
+
+  // Housekeeping: (1) close pre-auth sockets past the admission deadline,
+  // (4) prune expired ephemeral state, and (4) reap an established room whose
+  // last authenticated contact is older than the idle TTL. Reschedules to the
+  // nearer of the short housekeeping cadence (only while pre-auth/ephemeral work
+  // remains) and the established room's idle deadline; a never-established room
+  // with nothing left to watch lets the DO hibernate.
   async alarm() {
     const now = Date.now();
     let pendingPreAuth = 0;
@@ -697,8 +769,34 @@ export class Room extends DurableObject {
       }
     }
     const remainingEphemeral = await this.pruneExpired(now);
+
+    // (4) Established-room idle TTL: reap a room unused past the window.
+    let idleDeadline = null;
+    if (await this.ctx.storage.get("verifier")) {
+      let last = await this.ctx.storage.get("lastActivity");
+      if (typeof last !== "number") {
+        // A room established before this feature shipped has no timestamp; start
+        // its window now rather than reaping a possibly-live pairing on sight.
+        last = now;
+        await this.ctx.storage.put("lastActivity", last);
+      }
+      idleDeadline = last + this.establishedIdleTtlMs();
+      if (now >= idleDeadline) {
+        this.dlog("relay established room unused past TTL; reaping");
+        await this.teardownRoom("room expired");
+        return;
+      }
+    }
+
+    let next = null;
     if (pendingPreAuth > 0 || remainingEphemeral > 0) {
-      await this.ctx.storage.setAlarm(now + HOUSEKEEPING_INTERVAL_MS);
+      next = now + HOUSEKEEPING_INTERVAL_MS;
+    }
+    if (idleDeadline !== null) {
+      next = next === null ? idleDeadline : Math.min(next, idleDeadline);
+    }
+    if (next !== null) {
+      await this.ctx.storage.setAlarm(next);
     }
   }
 

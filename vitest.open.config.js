@@ -23,6 +23,10 @@ export default defineWorkersConfig({
           bindings: {
             ATTEST_REQUIRED: "false",
             RELAY_ORIGIN: "https://relay.example",
+            // Small per-room daily byte quota so the quota test can cross it
+            // with a few frames. Each test uses a fresh room, so other tests
+            // (which relay far less than this) are unaffected.
+            RELAY_DAILY_BYTE_QUOTA: "1048576",
           },
         },
       },

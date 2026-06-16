@@ -43,6 +43,14 @@ const MAX_FRAME_BYTES = 256 * 1024;
 const MAX_CONTROL_BYTES = 8 * 1024;
 const FRAME_WINDOW_MS = 1000;
 const MAX_FRAMES_PER_WINDOW = 500;
+// (5) Pipe abuse / cost: cap relayed bytes per room per rolling 24h. The relay
+//     only sees ciphertext, so this bounds throughput regardless of content.
+//     Persisted (survives hibernation), flushed every QUOTA_FLUSH_BYTES to keep
+//     per-frame storage writes out of the hot path. Override with the
+//     RELAY_DAILY_BYTE_QUOTA env var.
+const QUOTA_WINDOW_MS = 24 * 60 * 60 * 1000;
+const DEFAULT_DAILY_BYTE_QUOTA = 512 * 1024 * 1024;
+const QUOTA_FLUSH_BYTES = 4 * 1024 * 1024;
 // (1)+(4) Housekeeping alarm cadence, and how long a never-established room may
 //     sit idle before its leftover state is reclaimed.
 const HOUSEKEEPING_INTERVAL_MS = 15 * 1000;
@@ -172,6 +180,41 @@ export class Room extends DurableObject {
     // keeps the DO live) is still bounded.
     this.admissionWindow = { start: 0, count: 0 };
     this.frameWindow = { start: 0, count: 0 };
+    // Per-room daily byte quota, loaded lazily from storage on first relayed
+    // frame. quotaFlushedBytes tracks the last value written to storage.
+    this.quota = null;
+    this.quotaFlushedBytes = 0;
+  }
+
+  // (5) Per-room daily byte quota. Accumulates relayed bytes; once the room has
+  // relayed more than the quota within the current 24h window it tears the room
+  // down (closes every socket) and returns true. The window rolls every 24h.
+  async overQuota(att, size) {
+    const now = Date.now();
+    const limit = parseInt(this.env.RELAY_DAILY_BYTE_QUOTA, 10) || DEFAULT_DAILY_BYTE_QUOTA;
+    if (this.quota === null) {
+      this.quota = (await this.ctx.storage.get("quota")) || { dayStart: now, bytes: 0 };
+      this.quotaFlushedBytes = this.quota.bytes;
+    }
+    if (now - this.quota.dayStart >= QUOTA_WINDOW_MS) {
+      this.quota = { dayStart: now, bytes: 0 };
+      this.quotaFlushedBytes = 0;
+      await this.ctx.storage.put("quota", this.quota);
+    }
+    this.quota.bytes += size;
+    if (this.quota.bytes > limit) {
+      await this.ctx.storage.put("quota", this.quota);
+      console.log(`relay ${tagOf(att)} daily byte quota exceeded (${this.quota.bytes} > ${limit}); closing room`);
+      for (const sock of this.ctx.getWebSockets()) {
+        try { sock.close(1008, "daily quota exceeded"); } catch { /* ignore */ }
+      }
+      return true;
+    }
+    if (this.quota.bytes - this.quotaFlushedBytes >= QUOTA_FLUSH_BYTES) {
+      this.quotaFlushedBytes = this.quota.bytes;
+      await this.ctx.storage.put("quota", this.quota);
+    }
+    return false;
   }
 
   // Fixed-window limiter: bumps the window's count and reports whether it now
@@ -252,6 +295,10 @@ export class Room extends DurableObject {
         if (this.rateLimited(this.frameWindow, MAX_FRAMES_PER_WINDOW, FRAME_WINDOW_MS)) {
           console.log(`relay ${tagOf(att)} frame rate exceeded; closing`);
           try { ws.close(1008, "frame rate exceeded"); } catch { /* ignore */ }
+          return;
+        }
+        // (5) Cap relayed bytes per room per day; overQuota tears the room down.
+        if (await this.overQuota(att, size)) {
           return;
         }
         return this.forward(ws, att, message);

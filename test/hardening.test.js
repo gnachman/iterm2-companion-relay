@@ -113,6 +113,22 @@ describe("(3) spliced frame size + rate caps", () => {
   });
 });
 
+describe("(5) per-room daily byte quota", () => {
+  it("closes the room once the daily byte quota is exceeded", async () => {
+    const room = freshRoom();
+    const { ws } = await admit(room, "mac");
+    const onClose = closed(ws);
+    // RELAY_DAILY_BYTE_QUOTA is 1 MiB in the open-mode config; 256 KiB frames
+    // (the max allowed size) cross it within a few sends, well under the
+    // per-second frame-rate cap.
+    const frame = new Uint8Array(256 * 1024);
+    for (let i = 0; i < 8; i++) {
+      try { ws.send(frame); } catch { break; }
+    }
+    expect((await onClose).code).toBe(1008);
+  });
+});
+
 describe("(4) signed room deletion", () => {
   async function established(room) {
     const key = await makeJoinKey();

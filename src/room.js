@@ -635,8 +635,11 @@ export class Room extends DurableObject {
           publicKeyRaw: b64ToBytes(rec.attestPublicKey),
           appId: this.env.APP_ID,
         });
-      } catch {
-        return json(403, { ok: false, error: "assertion rejected" });
+      } catch (e) {
+        // Surface the specific reason (signature / CBOR shape / key import /
+        // rpId) so a registration failure is diagnosable. The response goes only
+        // to the token-bearing client and carries no PII.
+        return json(403, { ok: false, error: `assertion rejected: ${String((e && e.message) || e)}` });
       }
       const counterKey = `assertcounter:${rec.attestKeyId}`;
       const lastCounter = await this.ctx.storage.get(counterKey);

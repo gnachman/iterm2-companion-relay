@@ -3,7 +3,9 @@
 // CanonicalEncodingTests, so a drift on either side fails loudly.
 
 import { describe, it, expect } from "vitest";
-import { canonicalEncode } from "./helpers.js";
+// Import the PRODUCTION encoder (the function the admission path actually runs),
+// not a test copy, so this byte-vector pins what really ships.
+import { canonicalEncode } from "../src/room.js";
 
 const hex = (b) => [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
 const enc = (s) => new TextEncoder().encode(s);

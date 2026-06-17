@@ -20,30 +20,19 @@ function bytesToB64(b) {
   return btoa(s);
 }
 
-/// Length-prefixed, domain-separated encoding, byte-identical to the worker's
-/// canonicalEncode and Swift's CanonicalEncoding.encode.
-export function canonicalEncode(domain, fields) {
-  const elems = [new TextEncoder().encode(domain), ...fields];
-  let total = 0;
-  for (const e of elems) total += 4 + e.length;
-  const out = new Uint8Array(total);
-  let o = 0;
-  for (const e of elems) {
-    out[o++] = (e.length >>> 24) & 0xff;
-    out[o++] = (e.length >>> 16) & 0xff;
-    out[o++] = (e.length >>> 8) & 0xff;
-    out[o++] = e.length & 0xff;
-    out.set(e, o);
-    o += e.length;
-  }
-  return out;
-}
+/// The PRODUCTION canonicalEncode, imported (and re-exported) so the helpers
+/// build transcripts with the exact function the admission path runs, not a copy
+/// that could silently drift from it.
+import { canonicalEncode } from "../src/room.js";
+export { canonicalEncode };
 
 /// Build the join transcript exactly as RelayJoin.transcript does:
-/// canonical("iterm2-relay-join", [roleByte, nonce, roomName, origin]).
+/// canonical("iterm2-relay-join", [version, roleByte, nonce, roomName, origin]).
+const PROTOCOL_VERSION = 1;
 export function transcript(role, nonceB64, roomName, origin = ORIGIN) {
   const enc = new TextEncoder();
   return canonicalEncode("iterm2-relay-join", [
+    new Uint8Array([PROTOCOL_VERSION]),
     new Uint8Array([ROLE_BYTE[role]]),
     b64ToBytes(nonceB64),
     enc.encode(roomName),

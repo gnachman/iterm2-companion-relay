@@ -217,7 +217,8 @@ describe("attested /register", () => {
     const assertion = await buildAssertion(otherKeys, challenge);
     const res = await post(room, "/register", { registrationToken, verifier: VERIFIER, challenge, assertion });
     expect(res.status).toBe(403);
-    expect(res.body.error).toBe("assertion rejected");
+    // The error now carries the specific reason ("assertion rejected: ...").
+    expect(res.body.error).toContain("assertion rejected");
   });
 
   it("rejects an assertion over a challenge that was never issued", async () => {

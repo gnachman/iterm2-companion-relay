@@ -16,12 +16,12 @@ import {
 
 const b64ToBytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 
-// Mirrors the worker's deleteTranscript: the "delete" domain (vs "join")
-// domain-separates a deletion from a join signature.
+// Mirrors the worker's deleteTranscript: a leading version byte then the
+// "delete" domain (vs "join") domain-separates a deletion from a join signature.
 function deleteTranscript(challengeB64, roomName, origin = ORIGIN) {
   const enc = new TextEncoder();
   return canonicalEncode("iterm2-relay-delete",
-    [b64ToBytes(challengeB64), enc.encode(roomName), enc.encode(origin)]);
+    [new Uint8Array([1]), b64ToBytes(challengeB64), enc.encode(roomName), enc.encode(origin)]);
 }
 
 async function getChallenge(room) {

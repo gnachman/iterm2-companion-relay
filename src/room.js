@@ -125,7 +125,7 @@ function concatBytes(a, b) {
 // len32be(field) || field. A leading domain string plus per-element 4-byte
 // big-endian length prefixes make distinct field tuples impossible to confuse.
 // `fields` are Uint8Array; `domain` is a string.
-function canonicalEncode(domain, fields) {
+export function canonicalEncode(domain, fields) {
   const elems = [new TextEncoder().encode(domain), ...fields];
   let total = 0;
   for (const e of elems) total += 4 + e.length;
@@ -147,6 +147,7 @@ function canonicalEncode(domain, fields) {
 function joinTranscript(role, nonceB64, roomName, origin) {
   const enc = new TextEncoder();
   return canonicalEncode("iterm2-relay-join", [
+    new Uint8Array([PROTOCOL_VERSION]),
     new Uint8Array([ROLE_BYTE[role]]),
     b64ToBytes(nonceB64),
     enc.encode(roomName),
@@ -176,6 +177,7 @@ async function verifyJoin(sigB64, transcriptBytes, verifierB64) {
 function deleteTranscript(challengeB64, roomName, origin) {
   const enc = new TextEncoder();
   return canonicalEncode("iterm2-relay-delete", [
+    new Uint8Array([PROTOCOL_VERSION]),
     b64ToBytes(challengeB64),
     enc.encode(roomName),
     enc.encode(origin),

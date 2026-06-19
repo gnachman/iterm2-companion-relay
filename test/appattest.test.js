@@ -196,7 +196,11 @@ async function buildAssertion({ clientDataHash, appId = APP_ID, counter = 1, key
   const counterBytes = new Uint8Array([
     (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff]);
   const authenticatorData = concat(rpIdHash, new Uint8Array([0x00]), counterBytes);
-  const nonce = concat(authenticatorData, clientDataHash);
+  // Match real App Attest: the Secure Enclave signs over
+  // nonce = SHA256(authenticatorData || clientDataHash) (so the ECDSA-SHA256
+  // signature is over SHA256(nonce)). Signing the bare concatenation would only
+  // exercise the old one-hash-short bug.
+  const nonce = await sha256(concat(authenticatorData, clientDataHash));
   const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, keys.privateKey, nonce));
   return { assertion: cborEncode({ signature: rawToDer(rawSig), authenticatorData }), publicKeyRaw, keys };
 }

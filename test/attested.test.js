@@ -98,7 +98,9 @@ async function buildAssertion(keys, challengeB64, { appId = APP_ID, counter = 1,
     (counter >>> 24) & 0xff, (counter >>> 16) & 0xff, (counter >>> 8) & 0xff, counter & 0xff]);
   const authenticatorData = concat(rpIdHash, new Uint8Array([0x00]), counterBytes);
   const clientDataHash = await sha256(canonicalEncode("iterm2-relay-attest", [b64ToBytes(challengeB64), new TextEncoder().encode(origin)]));
-  const nonce = concat(authenticatorData, clientDataHash);
+  // Match real App Attest: sign over nonce = SHA256(authenticatorData ||
+  // clientDataHash), so the ECDSA-SHA256 signature is over SHA256(nonce).
+  const nonce = await sha256(concat(authenticatorData, clientDataHash));
   const rawSig = new Uint8Array(await crypto.subtle.sign({ name: "ECDSA", hash: "SHA-256" }, keys.privateKey, nonce));
   return b64(cborEncode({ signature: rawToDer(rawSig), authenticatorData }));
 }

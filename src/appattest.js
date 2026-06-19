@@ -137,10 +137,15 @@ export async function verifyAssertion({
   }
   if (authenticatorData.length < 37) throw new AppAttestError("assertion authenticatorData too short");
 
-  // The signature is ECDSA-SHA256 over nonce = SHA256(authenticatorData ||
-  // clientDataHash). WebCrypto wants the IEEE-P1363 (raw r||s) form; App Attest
-  // ships DER, so convert.
-  const nonce = concat(authenticatorData, asBytes(clientDataHash));
+  // Apple signs the assertion over nonce = SHA256(authenticatorData ||
+  // clientDataHash). WebCrypto's ECDSA verify applies SHA-256 to whatever data
+  // we pass, so we must pass the nonce itself (already a SHA-256 digest): the
+  // Secure Enclave's signature is over SHA-256(nonce), i.e. a SHA-256 of the
+  // SHA-256 of the concatenation. (Passing the bare concatenation would verify
+  // one hash short, which silently "worked" only against the synthetic test.)
+  // App Attest ships the signature in DER; WebCrypto wants IEEE-P1363 raw r||s.
+  const nonce = new Uint8Array(await crypto.subtle.digest(
+    "SHA-256", concat(authenticatorData, asBytes(clientDataHash))));
   let key;
   try {
     key = await crypto.subtle.importKey(

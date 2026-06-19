@@ -356,8 +356,13 @@ export class Room extends DurableObject {
       nonce: b64(nonce),
       roomName: att.roomName,
       tag: att.tag,
+      // When true, admit() rejects rather than displacing an occupied slot.
+      // Only the NSE sets it; absent/false keeps the default displacing
+      // behavior, so older clients are unaffected.
+      nonDisplacing: hello.nonDisplacing === true,
     });
-    this.dlog(`relay ${tagOf(att)} hello role=${hello.role} -> challenged`);
+    this.dlog(`relay ${tagOf(att)} hello role=${hello.role}`
+      + `${hello.nonDisplacing === true ? " (non-displacing)" : ""} -> challenged`);
     ws.send(JSON.stringify({ nonce: b64(nonce) }));
   }
 
@@ -449,6 +454,21 @@ export class Room extends DurableObject {
           return;
         }
         await this.ctx.storage.put("pairingCycles", cycles);
+      }
+    }
+    // Non-displacing join (the NSE): if the role slot is already held, refuse
+    // instead of displacing the occupant, so a background fetch yields to a
+    // foreground app rather than fighting it for the slot. Absent flag keeps the
+    // default newest-wins displacing behavior below.
+    if (prev.nonDisplacing) {
+      const occupied = this.ctx.getWebSockets().some((other) => {
+        if (other === ws) return false;
+        const a = other.deserializeAttachment();
+        return a && a.state === "admitted" && a.role === role;
+      });
+      if (occupied) {
+        this.dlog(`relay ${tagOf(prev)} non-displacing ${role} refused: slot occupied`);
+        return this.reject(ws, "slot occupied");
       }
     }
     // Two slots, newest-wins: displace any current holder of this role. Do NOT

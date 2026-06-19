@@ -123,9 +123,11 @@ export async function openSocket(room) {
 /// Run the full admission handshake: Hello -> (Challenge) -> Proof -> Result.
 /// `proofFor` is given the parsed Challenge and returns the Proof object; it
 /// defaults to an empty proof (open-mode admission).
-export async function admit(room, role, proofFor = () => ({})) {
+export async function admit(room, role, proofFor = () => ({}), { nonDisplacing = false } = {}) {
   const ws = await openSocket(room);
-  ws.send(JSON.stringify({ v: 1, role }));
+  const hello = { v: 1, role };
+  if (nonDisplacing) hello.nonDisplacing = true;
+  ws.send(JSON.stringify(hello));
   const challenge = JSON.parse(await next(ws));
   const proof = await proofFor(challenge);
   ws.send(JSON.stringify(proof));

@@ -360,6 +360,10 @@ export class Room extends DurableObject {
       // Only the NSE sets it; absent/false keeps the default displacing
       // behavior, so older clients are unaffected.
       nonDisplacing: hello.nonDisplacing === true,
+      // Carry the connect time forward so a close/error log can report how long
+      // the socket lived (the key signal for diagnosing flap cadence). Only ever
+      // read by RELAY_LOG-gated logging; no new data is collected or retained.
+      connectedAt: att.connectedAt,
     });
     this.dlog(`relay ${tagOf(att)} hello role=${hello.role}`
       + `${hello.nonDisplacing === true ? " (non-displacing)" : ""} -> challenged`);
@@ -490,7 +494,8 @@ export class Room extends DurableObject {
     }
     // Preserve roomName/tag across the state change so forwarding/close logging
     // can still identify the room.
-    ws.serializeAttachment({ state: "admitted", role, roomName: prev.roomName, tag: prev.tag });
+    ws.serializeAttachment({ state: "admitted", role, roomName: prev.roomName, tag: prev.tag,
+      connectedAt: prev.connectedAt });
     const peerPresent = this.ctx.getWebSockets().some((s) => {
       if (s === ws) return false;
       const a = s.deserializeAttachment();
@@ -872,18 +877,26 @@ export class Room extends DurableObject {
     // No peer yet (pre-splice): drop silently, do not error the socket.
   }
 
+  // How long a socket lived, for close/error diagnostics: a fleet of parked macs
+  // flapping every few seconds vs. every few minutes points at different causes
+  // (self-eviction/displacement vs. an idle reap the keepalive is not covering).
+  livedMs(att) {
+    return typeof att?.connectedAt === "number" ? Date.now() - att.connectedAt : "?";
+  }
+
   async webSocketClose(ws, code, reason) {
     let att;
     try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
     this.dlog(`relay ${tagOf(att)} close role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
-      + `code=${code ?? "?"}${reason ? ` reason=${reason}` : ""}`);
+      + `code=${code ?? "?"}${reason ? ` reason=${reason}` : ""} lived=${this.livedMs(att)}ms`);
     this.closePeerOf(ws);
   }
 
   async webSocketError(ws) {
     let att;
     try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
-    this.dlog(`relay ${tagOf(att)} socket error role=${att?.role ?? "?"} state=${att?.state ?? "?"}`);
+    this.dlog(`relay ${tagOf(att)} socket error role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
+      + `lived=${this.livedMs(att)}ms`);
     this.closePeerOf(ws);
   }
 

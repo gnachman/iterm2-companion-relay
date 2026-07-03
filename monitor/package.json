@@ -1,0 +1,15 @@
+{
+  "name": "iterm2-relay-monitor",
+  "version": "0.2.0",
+  "private": true,
+  "type": "module",
+  "description": "Scheduled Cloudflare Worker that watches the self-hosted relay's pushed aggregate metrics (no logs, no PII) and emails on liveness loss, capacity, error spikes, exceptions, or traffic anomalies.",
+  "scripts": {
+    "test": "vitest run",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "vitest": "^3.2.4",
+    "wrangler": "^4.0.0"
+  }
+}

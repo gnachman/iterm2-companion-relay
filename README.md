@@ -7,7 +7,9 @@ pairings) is kept in SQLite and survives restarts.
 
 Runs as a single Node process behind a TLS-terminating reverse proxy.
 
-- **Deploy:** see [DEPLOY.md](DEPLOY.md).
+- **Self-host it:** see [SELF-HOSTING.md](SELF-HOSTING.md) — a guided walk-through
+  for running your own relay on a VPS, with or without Cloudflare in front.
+- **Deploy (maintainer reference):** see [DEPLOY.md](DEPLOY.md).
 - **Run locally:** `npm ci && npm start` (configure via env — see
   `ops/relay.env.example`).
 - **Test:** `npm test` (all tests run in plain Node).
@@ -22,3 +24,6 @@ Runs as a single Node process behind a TLS-terminating reverse proxy.
 - `bin/relay.js` — the process entrypoint.
 - `ops/` — systemd unit, Caddyfile, environment example, and the optional
   Cloudflare-origin firewall script.
+- `monitor/` — an optional Cloudflare Worker that watches the relay's pushed
+  aggregate metrics and emails on liveness loss, capacity, errors, or anomalies
+  (see [monitor/README.md](monitor/README.md)).

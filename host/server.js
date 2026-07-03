@@ -14,6 +14,7 @@ import { WebSocketServer } from "ws";
 import { StorageBackend } from "./storage.js";
 import { Runtime } from "./runtime.js";
 import { Metrics } from "./metrics.js";
+import { startMetricsPush } from "./metricspush.js";
 import { Room } from "../src/room.js";
 import { entryReject, ROOM_HEADER } from "../src/index.js";
 
@@ -44,6 +45,14 @@ const DEFAULTS = {
   trustProxy: false, // generic proxy (Caddy) -> trust X-Forwarded-For only
   trustCloudflare: false, // origin behind Cloudflare -> trust CF-Connecting-IP
   trustedHops: 1, // appending proxies in front; XFF is read Nth-from-right
+  // Off-box monitoring by OUTBOUND push (see host/metricspush.js): the relay
+  // POSTs an aggregate, PII-free snapshot to a collector on a timer. This keeps
+  // /metrics loopback-only — no inbound metrics surface, no origin hostname
+  // exposed — and lets an external watcher run a dead-man's-switch. Empty URL
+  // disables it (default).
+  metricsPushUrl: "",
+  metricsPushToken: "",
+  metricsPushMs: 60_000,
 };
 
 // Hop-by-hop / connection headers that must not be forwarded into the synthetic
@@ -370,6 +379,22 @@ export function createRelay(options = {}) {
     keepaliveTimer.unref?.();
   }
 
+  // Outbound metrics push to the off-box monitor. Enabled only when both a URL
+  // and a token are configured; otherwise the relay has no monitoring transport
+  // and /metrics stays loopback-only.
+  metrics.inc("metrics_push_errors_total", 0); // pre-register so it always appears
+  let stopMetricsPush = null;
+  function startMetricsPushIfConfigured() {
+    if (!cfg.metricsPushUrl || !cfg.metricsPushToken) return;
+    stopMetricsPush = startMetricsPush({
+      url: cfg.metricsPushUrl,
+      token: cfg.metricsPushToken,
+      intervalMs: cfg.metricsPushMs,
+      buildSnapshot: () => metrics.snapshot({ rooms_live: runtime.size, sockets_live: totalSockets }),
+      onError: () => metrics.inc("metrics_push_errors_total"),
+    });
+  }
+
   return {
     httpServer,
     wss,
@@ -386,6 +411,7 @@ export function createRelay(options = {}) {
         });
       });
       startKeepalive();
+      startMetricsPushIfConfigured();
       return this;
     },
     address() {
@@ -393,6 +419,7 @@ export function createRelay(options = {}) {
     },
     async close() {
       if (keepaliveTimer) clearInterval(keepaliveTimer);
+      if (stopMetricsPush) stopMetricsPush();
       for (const ws of wss.clients) {
         try { ws.close(1001, "server shutting down"); } catch { /* ignore */ }
       }

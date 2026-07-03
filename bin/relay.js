@@ -27,8 +27,20 @@ const overrides = {
   // Number of appending proxies in front, if any (default 1). Only relevant
   // when a trust flag is set; X-Forwarded-For is then read this-many-from-right.
   trustedHops: numEnv("RELAY_TRUSTED_HOPS"),
+  metricsPushMs: numEnv("RELAY_METRICS_PUSH_MS"),
 };
 for (const k of Object.keys(overrides)) if (overrides[k] === undefined) delete overrides[k];
+
+// Off-box monitoring by outbound push (host/metricspush.js). Both a collector
+// URL and a shared token are required to enable it; missing either leaves the
+// relay with no metrics egress and /metrics loopback-only.
+if (process.env.RELAY_METRICS_PUSH_URL) overrides.metricsPushUrl = process.env.RELAY_METRICS_PUSH_URL;
+if (process.env.RELAY_METRICS_PUSH_TOKEN) overrides.metricsPushToken = process.env.RELAY_METRICS_PUSH_TOKEN;
+if ((overrides.metricsPushUrl ? 1 : 0) ^ (overrides.metricsPushToken ? 1 : 0)) {
+  console.warn(
+    "relay: WARNING RELAY_METRICS_PUSH_URL and RELAY_METRICS_PUSH_TOKEN must both " +
+    "be set to enable metrics push; with only one set, push stays disabled.");
+}
 
 // Declare which fronting proxy is authoritative for the client IP. Behind a
 // generic proxy (Caddy) that sets X-Forwarded-For, set RELAY_TRUST_PROXY; behind

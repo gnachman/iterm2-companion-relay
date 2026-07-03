@@ -56,4 +56,31 @@ describe("Metrics", () => {
     // Only the allowed reason label values appear; nothing free-form.
     expect(out).not.toMatch(/room=|tag=|ip=|[0-9a-f]{64}/);
   });
+
+  describe("snapshot", () => {
+    it("flattens counters (rejections summed) plus the supplied gauges", () => {
+      const m = new Metrics();
+      m.inc("ws_upgrades_total", 5);
+      m.inc("http_requests_total", 40);
+      m.inc("http_errors_total", 2);
+      m.inc("process_exceptions_total", 1);
+      m.incReason("ws_upgrades_rejected_total", "rate_limited");
+      m.incReason("ws_upgrades_rejected_total", "ip_cap");
+      const snap = m.snapshot({ rooms_live: 3, sockets_live: 6 });
+      expect(snap).toEqual({
+        ws_upgrades_total: 5,
+        ws_upgrades_rejected_total: 2,
+        http_requests_total: 40,
+        http_errors_total: 2,
+        process_exceptions_total: 1,
+        rooms_live: 3,
+        sockets_live: 6,
+      });
+    });
+
+    it("defaults every field to 0 on a fresh registry", () => {
+      const snap = new Metrics().snapshot();
+      expect(Object.values(snap).every((v) => v === 0)).toBe(true);
+    });
+  });
 });

@@ -1,0 +1,76 @@
+{
+  // iTerm2 relay monitor: a scheduled Worker that watches the self-hosted relay's
+  // PUSHED aggregate metrics and emails on liveness loss / capacity / error
+  // spikes / exceptions / traffic anomalies. See src/worker.js for setup.
+  "name": "iterm2-relay-monitor",
+  "main": "src/worker.js",
+  "compatibility_date": "2025-09-06",
+  // Analysis cadence. The relay pushes every ~60s; a run every 5 min diffs the
+  // latest snapshot and enforces the staleness (liveness) window.
+  "triggers": {
+    "crons": [
+      "*/5 * * * *"
+    ]
+  },
+  // Observability ON here (unlike the relay): this Worker handles NO user traffic
+  // and stores no PII, so logging its own operation is safe and lets you debug the
+  // monitor itself. The relay stays logless.
+  "observability": {
+    "enabled": true
+  },
+  "kv_namespaces": [
+    {
+      // Holds the latest pushed snapshot, alert cooldown state, and the rolling
+      // per-hour-of-week baseline. Create with:
+      //   wrangler kv namespace create MONITOR_KV   (paste the id here)
+      "binding": "MONITOR_KV",
+      "id": "<your-kv-namespace-id>"
+    }
+  ],
+  "vars": {
+    // Email (Resend). ALERT_FROM must be on a domain verified in Resend.
+    "ALERT_FROM": "iTerm2 Relay Monitor <alerts@example.com>",
+    "ALERT_TO": "you@example.com",
+
+    // Liveness (dead-man's-switch): alert if no snapshot has arrived within this
+    // many minutes. The relay pushes every ~60s, so a few missed pushes = down.
+    "STALE_MINUTES": "5",
+
+    // Outside-in synthetic probe: each cron run opens a real WebSocket to the
+    // relay's PUBLIC origin and drives a mac-park handshake, exercising the whole
+    // inbound path (DNS, Cloudflare, firewall, proxy, WS upgrade, admission) that
+    // the metrics push cannot see. SET THIS to your relay's public origin (e.g.
+    // "https://relay.iterm2.com/") to enable the probe; empty disables it, so a
+    // freshly-deployed monitor doesn't page against a placeholder host.
+    "RELAY_PROBE_URL": "",
+    "PROBE_TIMEOUT_MS": "10000",
+
+    // Capacity: warn/critical when live sockets/rooms cross these fractions of the
+    // relay's configured caps (match RELAY_MAX_TOTAL_SOCKETS / RELAY_MAX_ROOMS).
+    "SOCKETS_CAP": "200000",
+    "ROOMS_CAP": "200000",
+    "CAP_WARN_FRAC": "0.7",
+    "CAP_CRIT_FRAC": "0.9",
+
+    // Error rate over the interval, with an absolute-volume floor.
+    "ERROR_RATIO": "0.05",
+    "ERROR_MIN_REQUESTS": "100",
+
+    // Swallowed process exceptions over the interval: alert at/above this count.
+    "EXCEPTION_THRESHOLD": "1",
+
+    // Anomaly: spike if >= 3x the baseline, drop if <= 0.3x; only once the
+    // baseline for this hour-of-week has >= MIN_SAMPLES weeks and is >= MIN_BASELINE
+    // requests/hour. MAX_SAMPLES is clamped up to MIN_SAMPLES in code so the
+    // baseline can always warm up (the old 6<14 config silently disabled anomaly).
+    "SPIKE_FACTOR": "3",
+    "DROP_FACTOR": "0.3",
+    "MIN_BASELINE": "50",
+    "MIN_SAMPLES": "4",
+    "MAX_SAMPLES": "8",
+
+    // Do not re-send the same alert within this many minutes (escalation to
+    // critical bypasses it).
+    "COOLDOWN_MINUTES": "360"
+  }
+}

@@ -19,6 +19,7 @@ const COUNTER_HELP = {
   http_requests_total: "HTTP (non-upgrade) requests received.",
   http_errors_total: "HTTP requests that threw and returned 500.",
   process_exceptions_total: "Process-level exceptions swallowed to keep serving.",
+  metrics_push_errors_total: "Outbound metrics-push attempts that failed (network or non-2xx).",
 };
 const GAUGE_HELP = {
   rooms_live: "Rooms currently resident in memory.",
@@ -48,6 +49,27 @@ export class Metrics {
     for (let i = 0; i < LIFETIME_BUCKETS.length; i++) {
       if (seconds <= LIFETIME_BUCKETS[i]) this.bucketCounts[i] += 1;
     }
+  }
+
+  // A flat, JSON-friendly view of the aggregate counters (reason-labeled
+  // counters summed to a single total) plus the supplied point-in-time gauges.
+  // This is what the outbound push sends to the off-box monitor — the same
+  // PII-free numbers /metrics renders, without the Prometheus text framing.
+  snapshot(gauges = {}) {
+    const c = (name) => this.counters.get(name) || 0;
+    let rejected = 0;
+    for (const [key, value] of this.counters) {
+      if (key.startsWith(`ws_upgrades_rejected_total\x00`)) rejected += value;
+    }
+    return {
+      ws_upgrades_total: c("ws_upgrades_total"),
+      ws_upgrades_rejected_total: rejected,
+      http_requests_total: c("http_requests_total"),
+      http_errors_total: c("http_errors_total"),
+      process_exceptions_total: c("process_exceptions_total"),
+      rooms_live: gauges.rooms_live || 0,
+      sockets_live: gauges.sockets_live || 0,
+    };
   }
 
   // `gauges` are point-in-time values supplied by the host at scrape time.

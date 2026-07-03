@@ -4,7 +4,9 @@
 // interprets spliced frames. See ../../../docs/companion-relay-design.md.
 
 import { describe, it, expect, beforeEach } from "vitest";
-import { admit, openSocket, next, closed, openMode, freshRoom } from "./helpers.js";
+import { admit, openSocket, next, closed, openMode, freshRoom, installRelay } from "./helpers.js";
+
+installRelay();
 
 describe("admission + splice (open mode)", () => {
   beforeEach(() => openMode());

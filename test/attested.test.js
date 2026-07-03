@@ -6,11 +6,19 @@
 
 import "reflect-metadata";
 import { describe, it, expect } from "vitest";
-import { SELF } from "cloudflare:test";
 import * as x509 from "@peculiar/x509";
 import { encode as cborEncode } from "../src/cbor.js";
 import { TEST_ROOT_PEM, testRootSigningKey } from "./fixtures/testRoot.js";
-import { admit, next, freshRoom, canonicalEncode, ORIGIN } from "./helpers.js";
+import { SELF, admit, next, freshRoom, canonicalEncode, ORIGIN, installRelay } from "./helpers.js";
+
+// Attested mode: fail-closed attestation required, trust anchored at the
+// throwaway test root, matching the app id the synthetic attestations carry.
+installRelay({
+  ATTEST_REQUIRED: "true",
+  APP_ID: "TEAMID12.com.example.app",
+  APPATTEST_ENV: "production",
+  APPATTEST_ROOT_PEM: TEST_ROOT_PEM,
+});
 
 const ALG = { name: "ECDSA", namedCurve: "P-256", hash: "SHA-256" };
 const APP_ID = "TEAMID12.com.example.app";

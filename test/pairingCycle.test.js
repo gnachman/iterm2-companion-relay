@@ -8,7 +8,9 @@
 // ../../../docs/companion-relay-design.md (Pairing confirmation).
 
 import { describe, it, expect } from "vitest";
-import { admit, closed, freshRoom } from "./helpers.js";
+import { admit, closed, freshRoom, installRelay } from "./helpers.js";
+
+installRelay();
 
 // Must match MAX_PAIRING_CYCLES in src/room.js.
 const MAX_PAIRING_CYCLES = 8;

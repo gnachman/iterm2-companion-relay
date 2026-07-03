@@ -8,7 +8,7 @@
 //   "challenged" sent Challenge {nonce}; awaiting Proof
 //   "admitted"   holds its role slot; frames are spliced to the peer
 
-import { DurableObject } from "cloudflare:workers";
+import { DurableObject } from "../host/runtime.js";
 import { verifyAttestation, verifyAssertion } from "./appattest.js";
 import { APPLE_APP_ATTEST_ROOT_PEM } from "./appleRoot.js";
 
@@ -259,33 +259,47 @@ export class Room extends DurableObject {
     return window.count > max;
   }
 
+  // HTTP requests only (/register, /attest*, /delete). WebSocket upgrades are
+  // handled by handleUpgrade(), which the host calls once it has accepted the
+  // socket at the transport layer (on Cloudflare the entry Worker forwarded the
+  // upgrade here; the split lets a plain Node http server own the handshake).
   async fetch(request) {
-    if (request.headers.get("Upgrade") !== "websocket") {
-      const url = new URL(request.url);
-      const res = await this.handleHttp(request, url);
-      // One explicit line per HTTP request (auto invocation logs are off), so
-      // /attest and /register stay visible. Identified by the opaque room tag.
-      const tag = await roomTag(request.headers.get("x-relay-room"));
-      this.dlog(`relay ${tag} ${request.method} ${url.pathname} -> ${res.status}`);
-      return res;
-    }
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-    this.ctx.acceptWebSocket(server);
-    // Capture the room name (validated by the entry Worker) so admission can
-    // build the join transcript; it's bound into the signature. Also derive a
-    // short log tag = hash(roomName): the room name is itself a rendezvous
-    // secret (knowing it lets an attacker target the room), so logs correlate
-    // by an opaque, non-reversible tag instead of leaking the name.
+    const url = new URL(request.url);
+    const res = await this.handleHttp(request, url);
+    // One explicit line per HTTP request (auto invocation logs are off), so
+    // /attest and /register stay visible. Identified by the opaque room tag.
+    const tag = await roomTag(request.headers.get("x-relay-room"));
+    this.dlog(`relay ${tag} ${request.method} ${url.pathname} -> ${res.status}`);
+    return res;
+  }
+
+  // Adopt a freshly accepted WebSocket for this room. `server` is the live
+  // socket the host handed us (its message/close/error events are already wired
+  // to this Room via ctx.acceptWebSocket).
+  async handleUpgrade(server, request) {
+    // Capture the room name (validated by the entry gate) so admission can
+    // build the join transcript; it's bound into the signature.
     const roomName = request.headers.get("x-relay-room");
+    // Wire the socket and set its initial admission state in ONE synchronous
+    // step: no await may sit between acceptWebSocket (which starts delivering
+    // frames) and this write. Otherwise an inbound frame could be handled — and
+    // the state advanced to challenged/admitted — during the gap, and this write
+    // would then clobber it back to "hello", so the next frame is mis-parsed as
+    // a bad hello. (tag is filled in just below; it is only a diagnostic label.)
+    this.ctx.acceptWebSocket(server);
+    server.serializeAttachment({ state: "hello", roomName, tag: null, connectedAt: Date.now() });
+    // Derive a short log tag = hash(roomName): the room name is itself a
+    // rendezvous secret (knowing it lets an attacker target the room), so logs
+    // correlate by an opaque, non-reversible tag instead of leaking the name.
+    // Hashing is async, so it happens AFTER the state is set; backfill the tag
+    // without disturbing whatever state the socket has since advanced to.
     const tag = await roomTag(roomName);
-    server.serializeAttachment({ state: "hello", roomName, tag, connectedAt: Date.now() });
+    const att = server.deserializeAttachment();
+    if (att && att.tag === null) server.serializeAttachment({ ...att, tag });
     // (1) Bound simultaneous un-admitted sockets, and arm the deadline sweep.
     this.evictExcessPreAuth(tag);
     await this.ensureAlarm();
     this.dlog(`relay ${tag} connect`);
-    return new Response(null, { status: 101, webSocket: client });
   }
 
   async handleHttp(request, url) {
@@ -413,11 +427,19 @@ export class Room extends DurableObject {
         return this.reject(ws, "ticket required");
       }
       const ticketKey = `ticket:${proof.ticket}`;
+      // ATOMIC single-use: no real-async await (crypto/network) may separate this
+      // read from the delete below, or two sockets could both read a live ticket
+      // and both admit — see the atomicity invariant in host/storage.js. The
+      // delete's `changes` is the compare-and-swap: only the socket that actually
+      // removed the row proceeds; a concurrent loser is rejected.
       const ticketRec = await this.ctx.storage.get(ticketKey);
       if (!ticketRec || ticketRec.expiresAt < Date.now()) {
         return this.reject(ws, "bad ticket");
       }
-      await this.ctx.storage.delete(ticketKey); // single-use
+      const consumed = await this.ctx.storage.delete(ticketKey); // single-use CAS
+      if (!consumed) {
+        return this.reject(ws, "bad ticket");
+      }
       return this.admit(ws, att.role, { keyId: ticketRec.keyId, publicKey: ticketRec.publicKey }, "ticket");
     }
     // Open-mode pairing: admit on connect (the documented degradation; bounded
@@ -450,6 +472,12 @@ export class Room extends DurableObject {
       }
       // A real handshake/displacement cycle (mac is present): charge the park's
       // budget and kill the room if grinding has blown past the cap.
+      // ATOMIC read-modify-write: no real-async await (crypto/network) may
+      // separate this get from the put below. On the single event-loop thread a
+      // storage await yields only a microtask, so this RMW completes within one
+      // socket's macrotask; a real-async here would let a concurrent phone admit
+      // on another socket interleave and lost-update the anti-SAS-grind counter
+      // (see the atomicity invariant in host/storage.js).
       if (!established) {
         const cycles = ((await this.ctx.storage.get("pairingCycles")) || 0) + 1;
         if (cycles > MAX_PAIRING_CYCLES) {

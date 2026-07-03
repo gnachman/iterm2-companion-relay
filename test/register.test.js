@@ -12,7 +12,10 @@ import {
   freshRoom,
   makeJoinKey,
   seedExpiredToken,
+  installRelay,
 } from "./helpers.js";
+
+installRelay();
 
 describe("registration token + /register", () => {
   // A phone may only admit while a mac is parked (real pairing always has the

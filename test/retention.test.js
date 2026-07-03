@@ -8,8 +8,12 @@
 // ../../../docs/companion-relay-design.md (Deletion, revocation, and expiry).
 
 import { describe, it, expect } from "vitest";
-import { env, runInDurableObject } from "cloudflare:test";
-import { admitSigned, freshRoom, makeJoinKey, register, seedVerifier } from "./helpers.js";
+import {
+  env, runInDurableObject, installRelay,
+  admitSigned, freshRoom, makeJoinKey, register, seedVerifier,
+} from "./helpers.js";
+
+installRelay();
 
 const stubFor = (room) => env.ROOM.get(env.ROOM.idFromName(room));
 

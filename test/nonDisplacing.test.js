@@ -4,8 +4,10 @@
 
 import { describe, it, expect } from "vitest";
 import {
-  admit, admitSigned, seedVerifier, makeJoinKey, freshRoom, transcript, signB64, closed,
+  admit, admitSigned, seedVerifier, makeJoinKey, freshRoom, transcript, signB64, closed, installRelay,
 } from "./helpers.js";
+
+installRelay();
 
 // An established room with a mac parked, so phone joins reach the slot logic
 // (rather than "mac offline"). Returns the room and the join key.

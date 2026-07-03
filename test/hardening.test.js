@@ -8,11 +8,13 @@
 // See ../../docs/companion-relay-design.md.
 
 import { describe, it, expect } from "vitest";
-import { SELF, env, runInDurableObject } from "cloudflare:test";
 import {
+  SELF, env, runInDurableObject, installRelay,
   openSocket, admit, admitSigned, closed, freshRoom,
   makeJoinKey, signB64, seedVerifier, transcript, canonicalEncode, ORIGIN,
 } from "./helpers.js";
+
+installRelay();
 
 const b64ToBytes = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
 

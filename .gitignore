@@ -1,4 +1,9 @@
 node_modules/
-.wrangler/
 dist/
 *.log
+# Stray captured terminal transcript (leaks hostname / prompts); never commit
+/output
+# SQLite state (relay pairings); never commit
+*.db
+*.db-shm
+*.db-wal

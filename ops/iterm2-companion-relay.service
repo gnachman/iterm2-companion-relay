@@ -1,0 +1,76 @@
+# systemd unit for the self-hosted relay.
+#
+# Install:
+#   sudo cp ops/iterm2-companion-relay.service /etc/systemd/system/
+#   sudo cp ops/relay.env.example /etc/iterm2-companion-relay.env   # then edit
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now iterm2-companion-relay
+#
+# Assumes the app is checked out at /opt/iterm2-companion-relay with deps
+# installed (npm ci --omit=dev) and node at /usr/bin/node. Adjust paths as
+# needed. Runs as a locked-down DynamicUser; the SQLite state lives in the
+# systemd-managed StateDirectory.
+
+[Unit]
+Description=iTerm2 Companion relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/iterm2-companion-relay
+ExecStart=/usr/bin/node bin/relay.js
+EnvironmentFile=/etc/iterm2-companion-relay.env
+
+# SQLite state: systemd creates/owns /var/lib/iterm2-companion-relay for the
+# DynamicUser. relay.env points RELAY_DB here.
+StateDirectory=iterm2-companion-relay
+StateDirectoryMode=0700
+
+# Restart on crash; a flapping *client* is normal and free, but the process
+# itself should always come back.
+Restart=always
+RestartSec=2
+# SIGTERM triggers the graceful shutdown in bin/relay.js.
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# Many idle parked sockets: raise the fd ceiling well above the default.
+LimitNOFILE=1048576
+
+# --- Hardening (cap the blast radius of a compromise) ---
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+# NOT MemoryDenyWriteExecute: V8's JIT needs a writable->executable page
+# transition, which that flag blocks — Node crashes at startup with a V8 fatal
+# error (verified on this host / Node 20), and Restart=always would crash-loop.
+# (Enabling it would require NODE_OPTIONS=--jitless and a perf hit.)
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# Return EPERM for filtered syscalls instead of killing with SIGSYS. Node's
+# libuv (1.46, bundled in Node 20) probes io_uring at startup; @system-service
+# doesn't permit io_uring_* (a deliberate kernel-attack-surface exclusion), so
+# without this the probe is SIGSYS-killed and the service crash-loops. With
+# EPERM the probe fails gracefully and libuv falls back to its threadpool —
+# io_uring stays blocked, Node runs.
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+# Resource caps (tune to your VPS; uncomment to enforce):
+# MemoryMax=512M
+# CPUQuota=100%
+
+[Install]
+WantedBy=multi-user.target

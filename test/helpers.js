@@ -1,15 +1,88 @@
-// Test helpers for driving the relay over real WebSockets in workerd.
+// Test helpers for driving the relay over real WebSockets against the
+// self-hosted Node host. Each integration test file calls installRelay() once
+// to spin up a real http+ws server (its own in-memory SQLite, its own ephemeral
+// port) for the file, then drives it with the same handshake helpers the
+// workerd suite used.
+//
+// SELF / env / runInDurableObject are thin shims over the host so the ported
+// test bodies read almost exactly as they did under @cloudflare/vitest-pool-
+// workers:
+//   - SELF.fetch(url|Request, init) -> fetch against the running host
+//   - env.ROOM.idFromName / .get     -> an opaque room-name stub
+//   - runInDurableObject(stub, (instance, state) => ...) -> the live RoomContext
+//     is `state` (it has .storage and .getWebSockets()); `instance` is the Room.
 
-import { SELF, env, runInDurableObject } from "cloudflare:test";
-import { expect } from "vitest";
+import { beforeAll, afterAll, expect } from "vitest";
+import { WebSocket } from "ws";
+import { createRelay } from "../host/server.js";
 
-let counter = 0;
-
-/// The relay origin the DO binds into join transcripts (matches the
-/// RELAY_ORIGIN test binding in vitest.config.js).
+/// The relay origin the host binds into join transcripts.
 export const ORIGIN = "https://relay.example";
 
 const ROLE_BYTE = { mac: 1, phone: 2 };
+const PROTOCOL_VERSION = 1;
+
+// Open admission mode is the default; attested files override via installRelay.
+const OPEN_ENV = {
+  ATTEST_REQUIRED: "false",
+  RELAY_ORIGIN: ORIGIN,
+  RELAY_LOG: "false",
+  // Small daily quota so the quota test can cross it with a few frames.
+  RELAY_DAILY_BYTE_QUOTA: "1048576",
+};
+
+let relay = null;
+let base = null;
+let wsBase = null;
+let counter = 0;
+
+/// Register beforeAll/afterAll hooks that start and stop a host for this file.
+export function installRelay(envOverrides = {}) {
+  beforeAll(async () => {
+    relay = createRelay({ env: { ...OPEN_ENV, ...envOverrides }, dbPath: ":memory:" });
+    await relay.listen(0, "127.0.0.1");
+    const port = relay.address().port;
+    base = `http://127.0.0.1:${port}`;
+    wsBase = `ws://127.0.0.1:${port}`;
+    counter = 0;
+  });
+  afterAll(async () => {
+    if (relay) await relay.close();
+    relay = null;
+  });
+}
+
+// --- cloudflare:test shims -------------------------------------------------
+
+export const SELF = {
+  fetch(input, init) {
+    let path, opts;
+    if (typeof input === "string" || input instanceof URL) {
+      const u = new URL(input);
+      path = u.pathname + u.search;
+      opts = init || {};
+    } else {
+      const u = new URL(input.url);
+      path = u.pathname + u.search;
+      opts = init || { method: input.method, headers: Object.fromEntries(input.headers) };
+    }
+    return fetch(base + path, opts);
+  },
+};
+
+export const env = {
+  ROOM: {
+    idFromName: (room) => room,
+    get: (room) => ({ room }),
+  },
+};
+
+export async function runInDurableObject(stub, fn) {
+  const ctx = await relay.runtime.get(stub.room);
+  return fn(ctx.instance, ctx);
+}
+
+// --- crypto helpers (unchanged from the workerd suite) ---------------------
 
 function b64ToBytes(s) {
   return Uint8Array.from(atob(s), (c) => c.charCodeAt(0));
@@ -21,14 +94,11 @@ function bytesToB64(b) {
 }
 
 /// The PRODUCTION canonicalEncode, imported (and re-exported) so the helpers
-/// build transcripts with the exact function the admission path runs, not a copy
-/// that could silently drift from it.
+/// build transcripts with the exact function the admission path runs.
 import { canonicalEncode } from "../src/room.js";
 export { canonicalEncode };
 
-/// Build the join transcript exactly as RelayJoin.transcript does:
-/// canonical("iterm2-relay-join", [version, roleByte, nonce, roomName, origin]).
-const PROTOCOL_VERSION = 1;
+/// Build the join transcript exactly as RelayJoin.transcript does.
 export function transcript(role, nonceB64, roomName, origin = ORIGIN) {
   const enc = new TextEncoder();
   return canonicalEncode("iterm2-relay-join", [
@@ -53,29 +123,21 @@ export async function signB64(privateKey, bytes) {
   return bytesToB64(sig);
 }
 
-/// Seed a registered verifier directly into a room's DO storage, marking it an
+/// Seed a registered verifier directly into a room's storage, marking it an
 /// established room (bypasses /register so signature admission can be tested in
 /// isolation).
 export async function seedVerifier(room, verifierB64) {
-  const id = env.ROOM.idFromName(room);
-  const stub = env.ROOM.get(id);
-  await runInDurableObject(stub, async (_instance, state) => {
-    await state.storage.put("verifier", verifierB64);
-  });
+  await relay.backend.forRoom(room).put("verifier", verifierB64);
 }
 
 /// Seed an already-expired registration token, to test TTL rejection.
 export async function seedExpiredToken(room, token) {
-  const id = env.ROOM.idFromName(room);
-  const stub = env.ROOM.get(id);
-  await runInDurableObject(stub, async (_instance, state) => {
-    await state.storage.put(`regtoken:${token}`, { expiresAt: Date.now() - 1000 });
-  });
+  await relay.backend.forRoom(room).put(`regtoken:${token}`, { expiresAt: Date.now() - 1000 });
 }
 
 /// POST /register. Returns { status, body }.
 export async function register(room, payload) {
-  const res = await SELF.fetch("https://relay.example/register", {
+  const res = await fetch(base + "/register", {
     method: "POST",
     headers: { "x-relay-room": room, "content-type": "application/json" },
     body: JSON.stringify(payload),
@@ -83,14 +145,14 @@ export async function register(room, payload) {
   return { status: res.status, body: await res.json() };
 }
 
-/// A fresh, syntactically valid (64 lowercase hex) room name, unique per call
-/// so tests are isolated without isolated storage.
+/// A fresh, syntactically valid (64 lowercase hex) room name, unique per call.
 export function freshRoom() {
   counter += 1;
   return counter.toString(16).padStart(64, "0");
 }
 
-/// The next message (string) on a socket, or reject if it closes first.
+/// The next message (string for text frames) on a socket, or reject if it
+/// closes first.
 export function next(ws) {
   return new Promise((resolve, reject) => {
     ws.addEventListener("message", (e) => resolve(e.data), { once: true });
@@ -111,18 +173,15 @@ export function closed(ws) {
 
 /// Open a raw (un-admitted) WebSocket to a room.
 export async function openSocket(room) {
-  const res = await SELF.fetch("https://relay.example/", {
-    headers: { "x-relay-room": room, Upgrade: "websocket" },
+  const ws = new WebSocket(wsBase + "/", { headers: { "x-relay-room": room } });
+  await new Promise((resolve, reject) => {
+    ws.addEventListener("open", () => resolve(), { once: true });
+    ws.addEventListener("error", (e) => reject(e.error || new Error("ws error")), { once: true });
   });
-  expect(res.status).toBe(101);
-  const ws = res.webSocket;
-  ws.accept();
   return ws;
 }
 
 /// Run the full admission handshake: Hello -> (Challenge) -> Proof -> Result.
-/// `proofFor` is given the parsed Challenge and returns the Proof object; it
-/// defaults to an empty proof (open-mode admission).
 export async function admit(room, role, proofFor = () => ({}), { nonDisplacing = false } = {}) {
   const ws = await openSocket(room);
   const hello = { v: 1, role };
@@ -142,6 +201,5 @@ export async function admitSigned(room, role, privateKey) {
   }));
 }
 
-/// Open admission mode is the test-wide default (set in vitest.config.js
-/// miniflare bindings). Kept as a no-op so test intent reads clearly.
+/// Open admission mode is the test-wide default; kept as a no-op for intent.
 export function openMode() {}

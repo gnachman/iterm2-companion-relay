@@ -15,7 +15,10 @@ import {
   signB64,
   transcript,
   seedVerifier,
+  installRelay,
 } from "./helpers.js";
+
+installRelay();
 
 describe("established-room signature admission", () => {
   it("admits a join carrying a valid signature, then splices", async () => {

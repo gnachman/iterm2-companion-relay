@@ -1,0 +1,43 @@
+# Caddy reverse proxy for the relay. Terminates TLS and forwards to the
+# localhost Node process. WebSocket upgrades pass through transparently.
+#
+#   sudo cp ops/Caddyfile /etc/caddy/Caddyfile   # merge into your existing one
+#   sudo systemctl reload caddy
+#
+# Privacy: access logging is DISABLED so no client IP is ever written to disk,
+# preserving the relay's zero-retention posture. Do not re-enable it.
+
+relay.iterm2.com {
+	# Replace (do not append) X-Forwarded-For with the real TCP peer, so the
+	# forwarded IP the relay rate-limits on cannot be spoofed by the client.
+	# Also strip any client-supplied CF-Connecting-IP: in Option A there is no
+	# Cloudflare in front, so a client could otherwise forge one. (The relay only
+	# trusts CF-Connecting-IP under RELAY_TRUST_CLOUDFLARE, which Option A does not
+	# set — but delete it here too as defense in depth.)
+	reverse_proxy 127.0.0.1:8787 {
+		header_up X-Forwarded-For {remote_host}
+		header_up -CF-Connecting-IP
+	}
+
+	log {
+		output discard
+	}
+
+	# --- Option A (default): origin-only, Caddy gets a Let's Encrypt cert
+	# automatically. Nothing more to configure; ports 80+443 must be reachable
+	# from the internet for the ACME challenge.
+
+	# --- Option B: behind Cloudflare's free proxy (orange cloud) for DDoS
+	# absorption. Cloudflare terminates TLS to the browser; use a free
+	# Cloudflare Origin CA cert here and set the origin firewall to CF IPs
+	# (ops/cloudflare-origin-firewall.sh). Uncomment:
+	#
+	# tls /etc/caddy/cf-origin.pem /etc/caddy/cf-origin-key.pem
+	#
+	# In Cloudflare: proxied (orange-cloud) DNS record, SSL/TLS mode
+	# "Full (strict)". Client IP arrives as CF-Connecting-IP; set
+	# RELAY_TRUST_CLOUDFLARE=true (instead of RELAY_TRUST_PROXY) so the relay
+	# keys per-IP caps on it. Drop the `header_up -CF-Connecting-IP` line above
+	# in Option B (Cloudflare sets it), and keep the origin firewall applied so
+	# only Cloudflare can reach the origin and forge it.
+}

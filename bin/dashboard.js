@@ -27,6 +27,9 @@ function num(name, dflt) {
 const dash = createDashboard({
   dbPath: process.env.DASHBOARD_DB || "dashboard.db",
   metricsUrl: process.env.DASHBOARD_METRICS_URL || "http://127.0.0.1:8788/metrics",
+  // The self-hosted push relay's loopback /metrics (empty string disables the
+  // push section). Defaults to the on-box push relay port.
+  pushMetricsUrl: process.env.DASHBOARD_PUSH_METRICS_URL ?? "http://127.0.0.1:8790/metrics",
   scrapeIntervalMs: num("DASHBOARD_SCRAPE_MS", 30_000),
   retentionMs: num("DASHBOARD_RETENTION_DAYS", 90) * 24 * 60 * 60 * 1000,
   user: USER,

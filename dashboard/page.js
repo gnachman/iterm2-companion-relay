@@ -84,6 +84,8 @@ export function renderPage() {
     box-shadow: 0 4px 14px rgba(0,0,0,0.18); opacity: 0; transition: opacity .08s; }
   .tt .t { color: var(--muted); }
   .tt .v { font-weight: 650; font-variant-numeric: tabular-nums; }
+  .section { font-size: 14px; font-weight: 650; margin: 28px 0 12px; padding-top: 8px; border-top: 1px solid var(--border); }
+  .section .stale { color: var(--muted); font-weight: 400; font-size: 12px; margin-left: 8px; }
   footer { color: var(--muted); font-size: 11px; padding: 0 20px 24px; max-width: 1200px; margin: 0 auto; }
   a { color: var(--blue); }
 </style>
@@ -99,6 +101,9 @@ export function renderPage() {
   <div id="health" hidden></div>
   <div class="tiles" id="tiles"></div>
   <div class="charts" id="charts"></div>
+  <div class="section" id="push-section" hidden>Push relay<span class="stale" id="push-stale"></span></div>
+  <div class="tiles" id="push-tiles" hidden></div>
+  <div class="charts" id="push-charts" hidden></div>
 </main>
 <footer id="foot"></footer>
 <div class="tt" id="tt"></div>
@@ -162,6 +167,30 @@ const CHARTS = [
   { k: "short_lived_frac", title: "Short-lived fraction (<1s)", color: "--magenta", fmt: (v) => v==null?"—":(v*100).toFixed(0)+"%", pctAxis: true },
 ];
 
+// --- push relay: tiles + charts (rendered from data.push when present) --------
+const PUSH_TILES = [
+  { k: "devices", label: "Devices", fmt: num, note: () => "registered" },
+  { k: "registrations", label: "Registrations", fmt: num, note: (t) => t.skips + " skipped (" + pct(t.skip_pct) + ")" },
+  { k: "writes", label: "KV writes", fmt: num, note: () => "in range" },
+  { k: "pushes", label: "Pushes", fmt: num, note: () => "in range" },
+  { k: "delivered", label: "Delivered", fmt: num,
+    status: (t) => t.pushes > 0 && t.deliver_pct < 90 ? "warn" : "good",
+    note: (t) => pct(t.deliver_pct) + " of pushes" },
+  { k: "bad_secret", label: "Bad secret", fmt: num,
+    status: (t) => t.bad_secret > 0 ? "warn" : "good", note: () => "in range" },
+  { k: "unknown_token", label: "Unknown token", fmt: num,
+    status: (t) => t.unknown_token > 0 ? "warn" : "good", note: () => "in range" },
+  { k: "apns_errors", label: "APNs errors", fmt: num,
+    status: (t) => t.apns_errors > 0 ? "warn" : "good", note: () => "in range" },
+];
+const PUSH_CHARTS = [
+  { k: "devices", title: "Registered devices", color: "--blue", fmt: num },
+  { k: "push_delivered_rate", title: "Pushes delivered /min", color: "--aqua", fmt: num },
+  { k: "push_bad_secret_rate", title: "Bad-secret pushes /min", color: "--red", fmt: num },
+  { k: "register_written_rate", title: "Register writes /min", color: "--yellow", fmt: num },
+  { k: "register_skipped_rate", title: "Register skips /min", color: "--violet", fmt: num },
+];
+
 function cssVar(name) { return getComputedStyle(document.body).getPropertyValue(name).trim(); }
 
 function renderRanges() {
@@ -198,10 +227,9 @@ function renderHealth(alerts) {
   }
 }
 
-function renderTiles(t) {
-  const el = document.getElementById("tiles");
+function fillTiles(el, specs, t) {
   el.innerHTML = "";
-  for (const spec of TILES) {
+  for (const spec of specs) {
     const d = document.createElement("div");
     d.className = "tile" + (spec.status ? " status-" + spec.status(t) : "");
     const lbl = document.createElement("div"); lbl.className = "label"; lbl.textContent = spec.label;
@@ -210,6 +238,25 @@ function renderTiles(t) {
     if (spec.note) { const n = document.createElement("div"); n.className = "note"; n.textContent = spec.note(t); d.appendChild(n); }
     el.appendChild(d);
   }
+}
+function renderTiles(t) { fillTiles(document.getElementById("tiles"), TILES, t); }
+
+// The push relay section: hidden entirely when the payload carries no push data
+// (push collection disabled), so the dashboard degrades to relay-only cleanly.
+function renderPushSection(push, windowObj) {
+  const section = document.getElementById("push-section");
+  const tilesEl = document.getElementById("push-tiles");
+  const chartsEl = document.getElementById("push-charts");
+  if (!push) { section.hidden = tilesEl.hidden = chartsEl.hidden = true; return; }
+  section.hidden = tilesEl.hidden = chartsEl.hidden = false;
+
+  const stale = document.getElementById("push-stale");
+  stale.textContent = push.tiles.last_sample_ts ? "· updated " + dur(push.tiles.stale_ms) : "· no samples yet";
+  stale.style.color = (push.tiles.stale_ms != null && push.tiles.stale_ms > 180000) ? "var(--critical)" : "var(--muted)";
+
+  fillTiles(tilesEl, PUSH_TILES, push.tiles);
+  chartsEl.innerHTML = "";
+  for (const spec of PUSH_CHARTS) chartsEl.appendChild(renderChart(spec, push.series[spec.k] || [], windowObj));
 }
 
 // Build one small-multiple line chart as inline SVG with a crosshair + tooltip.
@@ -308,6 +355,7 @@ async function load() {
     renderHealth(data.alerts || []);
     renderTiles(data.tiles);
     renderCharts(data.series, data.window);
+    renderPushSection(data.push, data.window);
     const fresh = document.getElementById("freshness");
     fresh.textContent = data.tiles.last_sample_ts
       ? "updated " + dur(data.tiles.stale_ms)

@@ -150,3 +150,79 @@ export function buildDashboard(rows, {
     series: bucketize(rows, fromMs, toMs, buckets),
   };
 }
+
+// --- Push relay -------------------------------------------------------------
+// Same reset-aware treatment as the relay (counters reset to ~0 on restart), for
+// the push_samples rows. `devices` is a gauge; everything else is a cumulative
+// counter charted as a per-minute rate and summed over the window for a tile.
+const PUSH_RATE_FIELDS = [
+  "register", "register_written", "register_skipped", "register_rejected",
+  "push", "push_delivered", "push_bad_secret", "push_unknown_token",
+  "push_apns_error", "rate_limited",
+];
+
+function bucketizePush(rows, fromMs, toMs, buckets) {
+  const span = Math.max(1, toMs - fromMs);
+  const width = span / buckets;
+  const idx = (ts) => Math.min(buckets - 1, Math.max(0, Math.floor((ts - fromMs) / width)));
+
+  const gaugeAcc = Array.from({ length: buckets }, () => ({ devices: 0, n: 0 }));
+  for (const r of rows) { const b = gaugeAcc[idx(r.ts)]; b.devices += r.devices; b.n += 1; }
+
+  const rateAcc = Array.from({ length: buckets }, () => {
+    const o = { elapsedMs: 0 };
+    for (const f of PUSH_RATE_FIELDS) o[f] = 0;
+    return o;
+  });
+  for (let i = 1; i < rows.length; i++) {
+    const prev = rows[i - 1], cur = rows[i];
+    const acc = rateAcc[idx(cur.ts)];
+    acc.elapsedMs += Math.max(0, cur.ts - prev.ts);
+    for (const f of PUSH_RATE_FIELDS) acc[f] += step(prev, cur, f);
+  }
+
+  const centers = Array.from({ length: buckets }, (_, i) => Math.round(fromMs + width * (i + 0.5)));
+  const gauge = centers.map((t, i) => { const b = gaugeAcc[i]; return { t, v: b.n ? +(b.devices / b.n).toFixed(2) : null }; });
+  const rate = (field) => centers.map((t, i) => {
+    const a = rateAcc[i];
+    return { t, v: a.elapsedMs > 0 ? +((a[field] / a.elapsedMs) * 60000).toFixed(3) : null };
+  });
+
+  return {
+    devices: gauge,
+    register_written_rate: rate("register_written"),
+    register_skipped_rate: rate("register_skipped"),
+    push_delivered_rate: rate("push_delivered"),
+    push_bad_secret_rate: rate("push_bad_secret"),
+  };
+}
+
+// Build the push-relay payload for a window. Same args as buildDashboard; returns
+// { tiles, series } (no separate alerts panel — bad-secret/APNs-error tiles carry
+// the status). `latest` is the newest push sample overall.
+export function buildPush(rows, { latest = null, fromMs, toMs, buckets = 240, nowMs } = {}) {
+  const cur = latest || (rows.length ? rows[rows.length - 1] : null);
+  const registrations = windowTotal(rows, "register");
+  const skips = windowTotal(rows, "register_skipped");
+  const pushes = windowTotal(rows, "push");
+  const delivered = windowTotal(rows, "push_delivered");
+
+  const tiles = {
+    devices: cur ? cur.devices : 0,
+    registrations,
+    writes: windowTotal(rows, "register_written"),
+    skips,
+    skip_pct: registrations > 0 ? +((skips / registrations) * 100).toFixed(1) : 0,
+    pushes,
+    delivered,
+    deliver_pct: pushes > 0 ? +((delivered / pushes) * 100).toFixed(1) : 0,
+    bad_secret: windowTotal(rows, "push_bad_secret"),
+    unknown_token: windowTotal(rows, "push_unknown_token"),
+    apns_errors: windowTotal(rows, "push_apns_error"),
+    rate_limited: windowTotal(rows, "rate_limited"),
+    last_sample_ts: latest ? latest.ts : (rows.length ? rows[rows.length - 1].ts : null),
+    stale_ms: latest && nowMs ? nowMs - latest.ts : null,
+  };
+
+  return { tiles, series: bucketizePush(rows, fromMs, toMs, buckets) };
+}

@@ -19,6 +19,12 @@ export function startCollector({
   now = Date.now,
   onError,
   onSample,
+  // The relay and the push relay expose different metric shapes on different
+  // loopback endpoints, so the parse/insert/prune are injectable. Defaults keep
+  // the original companion-relay behavior; the push collector passes its own.
+  parse = parseMetrics,
+  insert = (ts, snap) => db.insert(ts, snap),
+  prune = (cutoff) => db.prune(cutoff),
 }) {
   let pruneAccum = 0;
 
@@ -27,9 +33,9 @@ export function startCollector({
       const res = await fetchImpl(url, { headers: { accept: "text/plain" } });
       if (!res || !res.ok) throw new Error(`scrape HTTP ${res ? res.status : "no response"}`);
       const text = await res.text();
-      const snapshot = parseMetrics(text);
+      const snapshot = parse(text);
       const ts = now();
-      db.insert(ts, snapshot);
+      insert(ts, snapshot);
       if (onSample) onSample(ts, snapshot);
     } catch (e) {
       if (onError) onError(e);
@@ -38,7 +44,7 @@ export function startCollector({
     pruneAccum += intervalMs;
     if (pruneAccum >= 3_600_000) {
       pruneAccum = 0;
-      try { db.prune(now() - retentionMs); } catch (e) { if (onError) onError(e); }
+      try { prune(now() - retentionMs); } catch (e) { if (onError) onError(e); }
     }
   }
 

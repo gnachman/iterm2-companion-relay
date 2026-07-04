@@ -94,3 +94,38 @@ export function parseMetrics(text) {
 }
 
 export const LIFETIME_BUCKETS = LIFE_BUCKETS;
+
+// --- Push relay (`pushrelay_*`, served by Companion/PushRelay/host) -----------
+// A separate producer on its own loopback /metrics; same tolerant, line-oriented
+// approach. Counters map to the register write-vs-skip and push delivery signals;
+// `devices` is a gauge. Unknown/missing series default to 0.
+const PUSH_PLAIN = {
+  pushrelay_http_requests_total: "http_requests",
+  pushrelay_http_errors_total: "http_errors",
+  pushrelay_process_exceptions_total: "exceptions",
+  pushrelay_register_total: "register",
+  pushrelay_register_written_total: "register_written",
+  pushrelay_register_skipped_total: "register_skipped",
+  pushrelay_register_rejected_total: "register_rejected",
+  pushrelay_push_total: "push",
+  pushrelay_push_delivered_total: "push_delivered",
+  pushrelay_push_bad_secret_total: "push_bad_secret",
+  pushrelay_push_unknown_token_total: "push_unknown_token",
+  pushrelay_push_apns_error_total: "push_apns_error",
+  pushrelay_rate_limited_total: "rate_limited",
+  pushrelay_devices: "devices",
+};
+
+export const PUSH_FIELDS = Object.values(PUSH_PLAIN);
+
+export function parsePushMetrics(text) {
+  const out = {};
+  for (const f of PUSH_FIELDS) out[f] = 0;
+  for (const raw of String(text).split("\n")) {
+    const p = parseLine(raw);
+    if (!p || !Number.isFinite(p.value)) continue;
+    const flat = PUSH_PLAIN[p.name];
+    if (flat) out[flat] = p.value;
+  }
+  return out;
+}

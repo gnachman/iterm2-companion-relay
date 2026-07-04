@@ -9,7 +9,8 @@
 import http from "node:http";
 import { DashboardDB } from "./db.js";
 import { startCollector } from "./collector.js";
-import { buildDashboard } from "./series.js";
+import { buildDashboard, buildPush } from "./series.js";
+import { parsePushMetrics } from "./parse.js";
 import { requireAuth } from "./auth.js";
 import { renderPage } from "./page.js";
 
@@ -21,6 +22,9 @@ export function createDashboard(options = {}) {
   const cfg = {
     dbPath: ":memory:",
     metricsUrl: "http://127.0.0.1:8788/metrics",
+    // The self-hosted push relay's loopback /metrics. Empty string disables the
+    // push collector and drops the push section from the payload.
+    pushMetricsUrl: "http://127.0.0.1:8790/metrics",
     scrapeIntervalMs: 30_000,
     retentionMs: 90 * 24 * 60 * 60 * 1000,
     user: "",
@@ -56,6 +60,13 @@ export function createDashboard(options = {}) {
     const payload = buildDashboard(rows, {
       latest, fromMs, toMs, buckets, nowMs, caps: cfg.caps, errorCfg: cfg.errorCfg,
     });
+    // Push section, only when push collection is enabled. Absent -> the page
+    // simply doesn't render the push tiles/charts.
+    if (cfg.pushMetricsUrl) {
+      payload.push = buildPush(db.rangePush(fromMs, toMs), {
+        latest: db.latestPush(), fromMs, toMs, buckets, nowMs,
+      });
+    }
     sendJson(res, 200, payload);
   }
 
@@ -87,6 +98,7 @@ export function createDashboard(options = {}) {
   });
 
   let stopCollector = null;
+  let stopPushCollector = null;
 
   return {
     server,
@@ -107,6 +119,20 @@ export function createDashboard(options = {}) {
               now: cfg.now,
               onError: cfg.onError,
             });
+            if (cfg.pushMetricsUrl) {
+              stopPushCollector = startCollector({
+                db,
+                url: cfg.pushMetricsUrl,
+                intervalMs: cfg.scrapeIntervalMs,
+                retentionMs: cfg.retentionMs,
+                fetchImpl: cfg.fetchImpl,
+                now: cfg.now,
+                onError: cfg.onError,
+                parse: parsePushMetrics,
+                insert: (ts, snap) => db.insertPush(ts, snap),
+                prune: (cutoff) => db.prunePush(cutoff),
+              });
+            }
           }
           resolve();
         });
@@ -114,6 +140,7 @@ export function createDashboard(options = {}) {
     },
     async close() {
       if (stopCollector) stopCollector();
+      if (stopPushCollector) stopPushCollector();
       await new Promise((r) => server.close(r));
       if (!options.db) db.close();
     },

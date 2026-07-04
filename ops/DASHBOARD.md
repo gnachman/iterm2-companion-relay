@@ -77,6 +77,7 @@ Tests live in `test/dashboard/`; run `npm test`.
 | `DASHBOARD_PASSWORD` | *(required)* | Basic-auth password — refuses to start if unset |
 | `DASHBOARD_DB` | `dashboard.db` | SQLite path (point at a writable state dir) |
 | `DASHBOARD_METRICS_URL` | `http://127.0.0.1:8788/metrics` | The relay's loopback metrics endpoint |
+| `DASHBOARD_PUSH_METRICS_URL` | `http://127.0.0.1:8790/metrics` | The push relay's loopback metrics (set empty to hide the Push relay section) |
 | `DASHBOARD_SCRAPE_MS` | `30000` | Scrape interval |
 | `DASHBOARD_RETENTION_DAYS` | `90` | Age at which old samples are pruned |
 | `RELAY_MAX_TOTAL_SOCKETS`, `RELAY_MAX_ROOMS` | `200000` | Caps for the capacity health check (match the relay) |

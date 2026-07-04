@@ -6,6 +6,7 @@
   "description": "Self-hosted Node relay for iTerm2 Companion remote connectivity. Splices a phone and a Mac through outbound WebSockets; sees only ciphertext. See ../../docs/companion-relay-design.md.",
   "scripts": {
     "start": "node bin/relay.js",
+    "dashboard": "node bin/dashboard.js",
     "test": "vitest run --config vitest.node.config.js",
     "test:watch": "vitest --config vitest.node.config.js"
   },

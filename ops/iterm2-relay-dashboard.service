@@ -1,0 +1,55 @@
+# systemd unit for the relay metrics dashboard. Mirrors the relay unit's
+# hardening. Scrapes the relay's loopback /metrics into SQLite and serves an
+# authenticated dashboard on 127.0.0.1:8789 (Apache reverse-proxies to it).
+#
+# Install:
+#   sudo cp /opt/iterm2-companion-relay/ops/iterm2-relay-dashboard.service /etc/systemd/system/
+#   sudo cp /opt/iterm2-companion-relay/ops/relay-dashboard.env /etc/iterm2-relay-dashboard.env
+#   sudo chmod 600 /etc/iterm2-relay-dashboard.env
+#   sudo systemctl daemon-reload && sudo systemctl enable --now iterm2-relay-dashboard
+
+[Unit]
+Description=iTerm2 relay metrics dashboard
+After=network-online.target iterm2-companion-relay-cf.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=/opt/iterm2-companion-relay
+ExecStart=/usr/bin/node bin/dashboard.js
+EnvironmentFile=/etc/iterm2-relay-dashboard.env
+
+# SQLite history: systemd creates/owns /var/lib/iterm2-relay-dashboard for the
+# DynamicUser; the env file points DASHBOARD_DB here.
+StateDirectory=iterm2-relay-dashboard
+StateDirectoryMode=0700
+
+Restart=always
+RestartSec=2
+KillSignal=SIGTERM
+TimeoutStopSec=15
+
+# --- Hardening (same posture as the relay unit) ---
+DynamicUser=yes
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictAddressFamilies=AF_INET AF_INET6
+RestrictNamespaces=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+SystemCallFilter=@system-service
+SystemCallArchitectures=native
+# EPERM (not SIGSYS) so libuv's io_uring probe fails gracefully — see relay unit.
+SystemCallErrorNumber=EPERM
+CapabilityBoundingSet=
+
+[Install]
+WantedBy=multi-user.target

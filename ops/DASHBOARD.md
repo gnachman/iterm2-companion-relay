@@ -31,7 +31,10 @@ placeholders (`<DOMAIN>`, `<SUBPATH>`, etc.).
   the dashboard and the pager never disagree about "is this healthy." Relay
   counters reset to ~0 on restart, so every rate is computed from **reset-aware**
   deltas: a backwards step is a restart, shown as a gap, never a negative or a
-  spike.
+  spike. Among the tiles/charts is **Quota closes** (`relay_quota_exceeded_total`):
+  sockets the relay severed because a room blew its per-room daily byte quota
+  (`1008 daily quota exceeded`). It climbs while a client retries against an
+  exhausted cap — see the quota section in `ops/RUNBOOK.md`.
 - **Server** (`dashboard/server.js`, entrypoint `bin/dashboard.js`): binds to
   `127.0.0.1` only, serves the page at `/`, JSON at `/api/data`, and an
   unauthenticated `/healthz`. Every other route is behind in-app HTTP Basic auth
@@ -157,6 +160,10 @@ installed (`npm ci --omit=dev`, which provides `better-sqlite3`) and node at
 - **Database:** `/var/lib/iterm2-relay-dashboard/dashboard.db` (WAL mode). Safe to
   delete — it only holds history and is rebuilt from new scrapes; you lose the
   past charts, nothing else.
+- **Schema migrations are automatic.** When a new metric column is added to
+  `dashboard/db.js`, restarting the dashboard runs an in-place, idempotent
+  `ALTER TABLE … ADD COLUMN` (`ensureColumns`) that backfills existing rows to 0.
+  No manual migration, and no need to delete the DB across upgrades.
 - **Ports:** dashboard `127.0.0.1:8789`; it scrapes the relay at
   `DASHBOARD_METRICS_URL`. Neither needs a public port — only the reverse proxy
   does.

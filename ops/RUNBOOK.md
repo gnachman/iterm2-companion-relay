@@ -212,6 +212,62 @@ proxy → WS upgrade → admission) is failing where the metrics push can't see 
 
 ---
 
+## Not an alert: a user can't connect / client logs "1008 daily quota exceeded"
+
+This one does **not** page. The relay process is healthy and keeps pushing, so
+both liveness and the synthetic probe stay green — it surfaces instead as a
+**user report** ("my Mac won't connect") whose client logs show the relay
+closing the WebSocket with close code **1008**, reason **`daily quota
+exceeded`**.
+
+**Root cause.** Each room has a per-room **daily byte quota**: relayed bytes per
+rolling 24h, code default **512 MiB** (`RELAY_DAILY_BYTE_QUOTA`, enforced in
+`src/room.js` `overQuota`). A live terminal-sharing session (video stream +
+history tiles) can blow 512 MiB in one long sitting. Once a room crosses the cap
+it is torn down — **every** socket in that room is closed with `1008 daily quota
+exceeded` — and the byte count is **persisted**, so the room keeps refusing until
+its 24h window rolls. The relay sees only ciphertext; the cap is purely
+abuse/cost protection, not correctness.
+
+**Why it doesn't self-heal.** Neither app treats 1008 as terminal today: both
+reconnect on a backoff, immediately relay a frame, re-trip the still-exhausted
+quota, and get closed again — a silent all-day retry loop until the window resets
+or the cap is raised. (App-side handling is tracked separately.)
+
+**Triage.**
+
+1. **Dashboard:** the **Quota closes** tile and **Quota closes /min** chart are
+   nonzero and climbing. The counter increments once per
+   severed socket, so a client stuck in the retry loop makes it ramp steadily —
+   that ramp is the tell that someone is pinned against the cap right now.
+2. **On the box**, find the offending room and when its window resets. `bytes`
+   near the limit is the culprit; the window resets at `dayStart + 24h`:
+
+   ```sh
+   DB=$(sudo grep -E '^RELAY_DB=' /etc/iterm2-companion-relay-cf.env | cut -d= -f2-)
+   sudo sqlite3 -readonly "$DB" \
+     "SELECT room, json_extract(value,'\$.bytes') AS bytes,
+             datetime(json_extract(value,'\$.dayStart')/1000,'unixepoch') AS window_start
+      FROM kv WHERE key='quota' ORDER BY bytes DESC LIMIT 15;"
+   ```
+
+   `room` is an opaque hash, not the room name (zero PII).
+
+**Fix.** Raise the cap and restart. The persisted byte count is then below the
+new limit, so the room recovers on its **next frame** — no need to wait out the
+window:
+
+```sh
+sudo sed -i -E '/^#?[[:space:]]*RELAY_DAILY_BYTE_QUOTA=/d' /etc/iterm2-companion-relay-cf.env
+echo 'RELAY_DAILY_BYTE_QUOTA=8589934592' | sudo tee -a /etc/iterm2-companion-relay-cf.env   # 8 GiB
+sudo systemctl restart iterm2-companion-relay-cf
+```
+
+Production runs **8 GiB** (carried in `ops/relay.env.example`); raise further if
+legitimate sessions still hit it.
+
+---
+
 ## Reference facts (the gotchas that cost time)
 
 ### Config lives locally
@@ -249,6 +305,7 @@ the only one that should be deployed under that name.
 | Relay process | `iterm2-companion-relay-cf.service` → `bin/relay.js` |
 | Relay env (real secrets) | `/etc/iterm2-companion-relay-cf.env` (root) |
 | Relay loopback metrics | `http://127.0.0.1:8788/metrics` |
+| Relay SQLite state (per-room quota/tickets) | `$RELAY_DB` (opaque room hashes; zero PII) |
 | Outbound push code | `host/metricspush.js`, wired in `host/server.js` |
 | On-box dashboard | `iterm2-relay-dashboard.service` → `bin/dashboard.js` (SQLite, loopback) |
 | Monitor Worker | `monitor/` → `wrangler tail iterm2-relay-monitor` |
@@ -262,3 +319,7 @@ the only one that should be deployed under that name.
   it.
 - KV free-plan write cap: **1000/day, account-wide.** Budget: push (360) + cron
   (288) ≈ 648/day.
+- Per-room daily byte quota: `RELAY_DAILY_BYTE_QUOTA` = **8 GiB** in prod (code
+  default 512 MiB). Trips → `1008 daily quota exceeded`, persisted for the rolling
+  24h window; surfaced by the dashboard's **Quota closes** tile/chart
+  (`relay_quota_exceeded_total`). See the quota section above.

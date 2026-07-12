@@ -115,7 +115,16 @@ class RoomContext {
     // break degrades to exactly the failure mode being avoided.
     const rawClose = ws.close.bind(ws);
     ws.close = (code, reason) => {
-      if (!ws._closeFrameReceived) ws._serverClosed = true;
+      if (!ws._closeFrameReceived) {
+        ws._serverClosed = true;
+        // Report server-INITIATED closes to the host so it can meter them (the
+        // daily-byte-quota tear-down closes every socket with 1008 "daily quota
+        // exceeded"; src/room.js overQuota). Observed HERE at the call site,
+        // where code/reason are exactly what Room passed — the later 'close'
+        // event carries the peer's echoed close frame, which a compliant client
+        // returns with the same code but an EMPTY reason, so it can't classify.
+        this.runtime.onServerClose?.(code, reason?.toString?.() ?? reason);
+      }
       // Remove a closing socket from the routable set immediately, not on the
       // async 'close' event, so forward()/admit() never route a frame to a
       // just-displaced peer (workerd drops a closed socket synchronously; the ws
@@ -236,12 +245,15 @@ class RoomContext {
 }
 
 export class Runtime {
-  constructor({ RoomClass, env, backend }) {
+  constructor({ RoomClass, env, backend, onServerClose = null }) {
     this.RoomClass = RoomClass;
     this.env = env;
     this.backend = backend;
     this.rooms = new Map();
     this._closed = false;
+    // Optional host hook, invoked (code, reason) for every server-initiated
+    // socket close so the host can meter them — see the ws.close wrapper.
+    this.onServerClose = onServerClose;
   }
 
   get size() {

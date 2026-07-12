@@ -21,6 +21,9 @@ const COLUMNS = [
   "exceptions", "push_errors", "rooms_live", "sockets_live",
   ...LIFETIME_BUCKETS.map((b) => `life_le${b}`),
   "life_count", "life_sum",
+  // Appended after the initial schema shipped; see ensureColumns() for the
+  // in-place migration that adds it to a DB created before this column existed.
+  "quota_exceeded",
 ];
 
 // Push relay columns, in insertion order (mirrors parse.js's PUSH_FIELDS).
@@ -38,6 +41,7 @@ export class DashboardDB {
         ${cols}
       );
     `);
+    this.ensureColumns("samples", COLUMNS);
     const names = ["ts", ...COLUMNS];
     this.insertStmt = this.db.prepare(
       `INSERT OR REPLACE INTO samples (${names.join(", ")}) ` +
@@ -61,6 +65,7 @@ export class DashboardDB {
         ${pcols}
       );
     `);
+    this.ensureColumns("push_samples", PUSH_COLUMNS);
     const pnames = ["ts", ...PUSH_COLUMNS];
     this.pushInsertStmt = this.db.prepare(
       `INSERT OR REPLACE INTO push_samples (${pnames.join(", ")}) ` +
@@ -71,6 +76,21 @@ export class DashboardDB {
     );
     this.pushLatestStmt = this.db.prepare("SELECT * FROM push_samples ORDER BY ts DESC LIMIT 1");
     this.pushPruneStmt = this.db.prepare("DELETE FROM push_samples WHERE ts < ?");
+  }
+
+  // Additive, idempotent migration: a column appended to COLUMNS after a DB was
+  // first created won't exist yet (CREATE TABLE IF NOT EXISTS is a no-op on an
+  // existing table), which would make the prepared insert throw. Add any missing
+  // column so an in-place upgrade just works. Existing rows backfill to 0; the
+  // reset-aware rate math treats the 0->cumulative first step as one interval,
+  // which is harmless since the relay's own counter also restarts at 0 on the
+  // deploy that introduced the metric. Column names are code-controlled, never
+  // user input, so the string interpolation carries no injection surface.
+  ensureColumns(table, columns) {
+    const have = new Set(this.db.prepare(`PRAGMA table_info(${table})`).all().map((r) => r.name));
+    for (const c of columns) {
+      if (!have.has(c)) this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${c} REAL NOT NULL DEFAULT 0`);
+    }
   }
 
   // Store one scrape. `snapshot` is a parseMetrics() result; `ts` is ms epoch.

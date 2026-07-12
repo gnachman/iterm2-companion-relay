@@ -11,6 +11,7 @@ relay_ws_upgrades_rejected_total{reason="bad_room"} 4
 relay_http_requests_total 4
 relay_http_errors_total 1
 relay_process_exceptions_total 2
+relay_quota_exceeded_total 5
 relay_rooms_live 3
 relay_sockets_live 2
 # TYPE relay_socket_lifetime_seconds histogram
@@ -33,6 +34,7 @@ describe("parseMetrics", () => {
     expect(s.http_errors).toBe(1);
     expect(s.exceptions).toBe(2);
     expect(s.push_errors).toBe(0);
+    expect(s.quota_exceeded).toBe(5);
     expect(s.rooms_live).toBe(3);
     expect(s.sockets_live).toBe(2);
   });
@@ -52,7 +54,7 @@ describe("parseMetrics", () => {
 
   it("defaults every field to 0 on empty input", () => {
     const s = parseMetrics("");
-    for (const k of ["ws_upgrades", "ws_rejected", "http_requests", "http_errors", "exceptions", "push_errors", "rooms_live", "sockets_live", "life_le1", "life_count", "life_sum"]) {
+    for (const k of ["ws_upgrades", "ws_rejected", "http_requests", "http_errors", "exceptions", "push_errors", "quota_exceeded", "rooms_live", "sockets_live", "life_le1", "life_count", "life_sum"]) {
       expect(s[k]).toBe(0);
     }
   });

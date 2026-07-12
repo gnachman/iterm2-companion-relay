@@ -196,8 +196,23 @@ export function createRelay(options = {}) {
   const cfg = { ...DEFAULTS, ...options };
   const env = options.env || {};
   const backend = new StorageBackend(options.dbPath || ":memory:");
-  const runtime = new Runtime({ RoomClass: Room, env, backend });
   const metrics = new Metrics();
+  // A room that blows its daily byte quota tears down every socket with a 1008
+  // "daily quota exceeded" close (src/room.js overQuota). That close never
+  // touches the pre-handshake reject counters, so meter it via the runtime's
+  // server-close hook — counted per severed socket, so it keeps climbing while
+  // a client retries blindly against an exhausted quota (the "stuck at the cap"
+  // signal the dashboard surfaces). Other server closes (displacement) don't
+  // match and are ignored.
+  const runtime = new Runtime({
+    RoomClass: Room, env, backend,
+    onServerClose: (code, reason) => {
+      if (code === 1008 && /quota/.test(String(reason || ""))) {
+        metrics.inc("quota_exceeded_total");
+      }
+    },
+  });
+  metrics.inc("quota_exceeded_total", 0); // pre-register so it always appears
 
   // A falsy limit config disables that limiter entirely (mirrors the old
   // deployment where the rate-limit binding was optional): the deployment still

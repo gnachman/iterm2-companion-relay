@@ -20,6 +20,7 @@ const COUNTER_HELP = {
   http_errors_total: "HTTP requests that threw and returned 500.",
   process_exceptions_total: "Process-level exceptions swallowed to keep serving.",
   metrics_push_errors_total: "Outbound metrics-push attempts that failed (network or non-2xx).",
+  quota_exceeded_total: "Sockets closed because their room exceeded its daily byte quota.",
 };
 const GAUGE_HELP = {
   rooms_live: "Rooms currently resident in memory.",
@@ -67,6 +68,7 @@ export class Metrics {
       http_requests_total: c("http_requests_total"),
       http_errors_total: c("http_errors_total"),
       process_exceptions_total: c("process_exceptions_total"),
+      quota_exceeded_total: c("quota_exceeded_total"),
       rooms_live: gauges.rooms_live || 0,
       sockets_live: gauges.sockets_live || 0,
     };

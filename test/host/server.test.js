@@ -294,6 +294,29 @@ describe("metrics endpoint", () => {
     const res = await fetch(`${base}/metrics`, { headers: { "X-Forwarded-For": "1.2.3.4" } });
     expect(res.status).toBe(403);
   });
+
+  it("counts a room's daily-byte-quota tear-down in relay_quota_exceeded_total", async () => {
+    const room = freshRoom();
+    const mac = await admit(room, "mac");
+    const phone = await admit(room, "phone");
+    expect(phone.result.ok).toBe(true);
+
+    // OPEN_ENV caps the room at 1 MiB/day. Relay 256 KiB frames (the max frame
+    // size, so few frames trip it — well under the 500/s frame-rate limit):
+    // 5 frames = 1.25 MiB > 1 MiB, so overQuota closes every socket with a 1008
+    // "daily quota exceeded" frame. Await that close so the server-close hook
+    // has incremented the counter before we scrape.
+    const closed = new Promise((r) => mac.ws.once("close", (code) => r(code)));
+    const frame = Buffer.alloc(256 * 1024, 1);
+    for (let i = 0; i < 6; i++) mac.ws.send(frame);
+    expect(await closed).toBe(1008);
+
+    const body = await (await fetch(`${base}/metrics`)).text();
+    const m = body.match(/relay_quota_exceeded_total (\d+)/);
+    expect(m).toBeTruthy();
+    // Both the mac and phone sockets are severed by the tear-down.
+    expect(Number(m[1])).toBeGreaterThanOrEqual(1);
+  });
 });
 
 const delay = (ms) => new Promise((r) => setTimeout(r, ms));

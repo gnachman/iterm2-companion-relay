@@ -4,7 +4,7 @@ import { buildDashboard } from "../../dashboard/series.js";
 // Minimal DB-shaped row; only the fields under test need be set.
 const row = (ts, o = {}) => ({
   ts, ws_upgrades: 0, ws_rejected: 0, http_requests: 0, http_errors: 0,
-  exceptions: 0, push_errors: 0, rooms_live: 0, sockets_live: 0,
+  exceptions: 0, push_errors: 0, quota_exceeded: 0, rooms_live: 0, sockets_live: 0,
   life_le1: 0, life_le5: 0, life_le15: 0, life_le60: 0, life_le300: 0, life_le1800: 0,
   life_count: 0, life_sum: 0, ...o,
 });
@@ -42,6 +42,16 @@ describe("buildDashboard tiles", () => {
     expect(d.tiles.closed).toBe(10);
     expect(d.tiles.short_lived_pct).toBe(80);
     expect(d.tiles.avg_lifetime_s).toBe(20); // 200s / 10
+  });
+
+  it("sums quota-exceeded closes into a tile (reset-aware)", () => {
+    const rows = [
+      row(1000, { quota_exceeded: 0 }),
+      row(2000, { quota_exceeded: 3 }),
+      row(3000, { quota_exceeded: 5 }),
+    ];
+    const d = buildDashboard(rows, { latest: rows[2], fromMs: 0, toMs: 4000, nowMs: 4000 });
+    expect(d.tiles.quota_closes).toBe(5); // 5 - 0
   });
 
   it("reports current gauges from the latest sample", () => {
@@ -106,5 +116,16 @@ describe("buildDashboard series", () => {
     // false zero).
     expect(d.series.request_rate[0].v).toBeNull();
     expect(d.series.request_rate[1].v).toBeCloseTo(60, 0);
+  });
+
+  it("emits a per-minute quota-close rate series", () => {
+    const rows = [
+      row(0, { quota_exceeded: 0 }),
+      row(60000, { quota_exceeded: 30 }), // +30 closes over 60s => 30/min
+    ];
+    const d = buildDashboard(rows, { latest: rows[1], fromMs: 0, toMs: 120000, nowMs: 120000, buckets: 2 });
+    expect(d.series.quota_rate).toHaveLength(2);
+    expect(d.series.quota_rate[0].v).toBeNull();
+    expect(d.series.quota_rate[1].v).toBeCloseTo(30, 0);
   });
 });

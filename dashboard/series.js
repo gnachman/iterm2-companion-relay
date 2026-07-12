@@ -45,7 +45,7 @@ function bucketize(rows, fromMs, toMs, buckets) {
   }
 
   // Rate/derived accumulators, attributed to the bucket of the later sample.
-  const rateFields = ["ws_upgrades", "ws_rejected", "http_requests", "http_errors", "exceptions"];
+  const rateFields = ["ws_upgrades", "ws_rejected", "http_requests", "http_errors", "exceptions", "quota_exceeded"];
   const rateAcc = Array.from({ length: buckets }, () => {
     const o = { elapsedMs: 0, closed: 0, shortLived: 0 };
     for (const f of rateFields) o[f] = 0;
@@ -77,6 +77,7 @@ function bucketize(rows, fromMs, toMs, buckets) {
     request_rate: rateSeries("http_requests"),
     error_rate: rateSeries("http_errors"),
     rejected_rate: rateSeries("ws_rejected"),
+    quota_rate: rateSeries("quota_exceeded"),
     // Fraction of connections that closed within 1s in each slot: the flap signal.
     short_lived_frac: centers.map((t, i) => {
       const a = rateAcc[i];
@@ -116,6 +117,7 @@ export function buildDashboard(rows, {
     error_pct: requests > 0 ? +((errors / requests) * 100).toFixed(2) : 0,
     exceptions,
     push_errors: windowTotal(rows, "push_errors"),
+    quota_closes: windowTotal(rows, "quota_exceeded"),
     closed,
     short_lived_pct: closed > 0 ? +((shortLived / closed) * 100).toFixed(1) : 0,
     avg_lifetime_s: closed > 0 ? +(lifeSum / closed).toFixed(1) : 0,

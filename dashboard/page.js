@@ -152,6 +152,8 @@ const TILES = [
     status: (t) => t.short_lived_pct >= 60 ? "warn" : "good",
     note: (t) => t.closed + " closed" },
   { k: "avg_lifetime_s", label: "Avg lifetime", fmt: secs },
+  { k: "quota_closes", label: "Quota closes", fmt: num,
+    status: (t) => t.quota_closes > 0 ? "warn" : "good", note: () => "in range" },
   { k: "push_errors", label: "Push errors", fmt: num,
     status: (t) => t.push_errors > 0 ? "warn" : "good", note: () => "in range" },
 ];
@@ -164,6 +166,7 @@ const CHARTS = [
   { k: "upgrade_rate", title: "WS upgrades /min", color: "--violet", fmt: num },
   { k: "error_rate", title: "HTTP errors /min", color: "--red", fmt: num },
   { k: "rejected_rate", title: "Rejected upgrades /min", color: "--orange", fmt: num },
+  { k: "quota_rate", title: "Quota closes /min", color: "--orange", fmt: num },
   { k: "short_lived_frac", title: "Short-lived fraction (<1s)", color: "--magenta", fmt: (v) => v==null?"—":(v*100).toFixed(0)+"%", pctAxis: true },
 ];
 

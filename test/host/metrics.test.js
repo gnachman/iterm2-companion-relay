@@ -16,6 +16,16 @@ describe("Metrics", () => {
     expect(out).toMatch(/relay_ws_upgrades_total 2/);
   });
 
+  it("counts daily-byte-quota tear-down closes as a plain counter", () => {
+    const m = new Metrics();
+    m.inc("quota_exceeded_total");
+    m.inc("quota_exceeded_total");
+    const out = m.render({});
+    expect(out).toContain("# TYPE relay_quota_exceeded_total counter");
+    expect(out).toMatch(/relay_quota_exceeded_total 2/);
+    expect(m.snapshot().quota_exceeded_total).toBe(2);
+  });
+
   it("labels rejection reasons", () => {
     const m = new Metrics();
     m.incReason("ws_upgrades_rejected_total", "rate_limited");
@@ -73,6 +83,7 @@ describe("Metrics", () => {
         http_requests_total: 40,
         http_errors_total: 2,
         process_exceptions_total: 1,
+        quota_exceeded_total: 0,
         rooms_live: 3,
         sockets_live: 6,
       });

@@ -7,3 +7,5 @@ dist/
 *.db
 *.db-shm
 *.db-wal
+# Filled-in deploy config: holds the dashboard password / push token. Never commit.
+ops/deploy.env

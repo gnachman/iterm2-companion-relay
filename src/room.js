@@ -236,7 +236,7 @@ export class Room extends DurableObject {
       await this.ctx.storage.put("quota", this.quota);
       this.dlog(`relay ${tagOf(att)} daily byte quota exceeded (${this.quota.bytes} > ${limit}); closing room`);
       for (const sock of this.ctx.getWebSockets()) {
-        try { sock.close(1008, "daily quota exceeded"); } catch { /* ignore */ }
+        this.closeSocket(sock, 1008, "daily quota exceeded");
       }
       return true;
     }
@@ -326,7 +326,7 @@ export class Room extends DurableObject {
     const cap = att.state === "admitted" ? MAX_FRAME_BYTES : MAX_CONTROL_BYTES;
     if (size > cap) {
       this.dlog(`relay ${tagOf(att)} frame too large (${size} > ${cap}); closing`);
-      try { ws.close(1009, "frame too large"); } catch { /* ignore */ }
+      this.closeSocket(ws, 1009, "frame too large");
       return;
     }
     switch (att.state) {
@@ -338,7 +338,7 @@ export class Room extends DurableObject {
         // (3) Cap spliced frame rate per room.
         if (this.rateLimited(this.frameWindow, MAX_FRAMES_PER_WINDOW, FRAME_WINDOW_MS)) {
           this.dlog(`relay ${tagOf(att)} frame rate exceeded; closing`);
-          try { ws.close(1008, "frame rate exceeded"); } catch { /* ignore */ }
+          this.closeSocket(ws, 1008, "frame rate exceeded");
           return;
         }
         // (5) Cap relayed bytes per room per day; overQuota tears the room down.
@@ -347,7 +347,7 @@ export class Room extends DurableObject {
         }
         return this.forward(ws, att, message);
       default:
-        ws.close(1011, "bad state");
+        this.closeSocket(ws, 1011, "bad state");
     }
   }
 
@@ -356,10 +356,10 @@ export class Room extends DurableObject {
     try {
       hello = JSON.parse(message);
     } catch {
-      return ws.close(1008, "bad hello");
+      return this.closeSocket(ws, 1008, "bad hello");
     }
     if (hello.v !== PROTOCOL_VERSION || (hello.role !== "mac" && hello.role !== "phone")) {
-      return ws.close(1008, "bad hello");
+      return this.closeSocket(ws, 1008, "bad hello");
     }
     // Uniform first response: always a fresh nonce, regardless of admission
     // mode, so a connector cannot probe the room's state.
@@ -517,7 +517,7 @@ export class Room extends DurableObject {
       const a = other.deserializeAttachment();
       if (a && a.state === "admitted" && a.role === role) {
         this.dlog(`relay ${tagOf(prev)} displacing existing ${role}`);
-        other.close(1000, "displaced");
+        this.closeSocket(other, 1000, "displaced");
       }
     }
     // Preserve roomName/tag across the state change so forwarding/close logging
@@ -750,11 +750,7 @@ export class Room extends DurableObject {
   // signed delete-room path and the idle-TTL sweep.
   async teardownRoom(reason) {
     for (const ws of this.ctx.getWebSockets()) {
-      try {
-        ws.close(1000, reason);
-      } catch {
-        // ignore
-      }
+      this.closeSocket(ws, 1000, reason);
     }
     await this.ctx.storage.deleteAll();
     await this.ctx.storage.deleteAlarm();
@@ -769,11 +765,7 @@ export class Room extends DurableObject {
       .sort((x, y) => (x.a.connectedAt || 0) - (y.a.connectedAt || 0));
     for (let i = 0; i < preAuth.length - MAX_PREAUTH_SOCKETS; i++) {
       this.dlog(`relay ${tag} evicting oldest pre-auth socket (cap ${MAX_PREAUTH_SOCKETS})`);
-      try {
-        preAuth[i].ws.close(1008, "too many pending");
-      } catch {
-        // ignore
-      }
+      this.closeSocket(preAuth[i].ws, 1008, "too many pending");
     }
   }
 
@@ -817,11 +809,7 @@ export class Room extends DurableObject {
       if (!a || a.state === "admitted") continue;
       if (a.connectedAt && now - a.connectedAt > PREAUTH_DEADLINE_MS) {
         this.dlog(`relay ${tagOf(a)} pre-auth socket timed out; closing`);
-        try {
-          ws.close(1008, "admission timeout");
-        } catch {
-          // ignore
-        }
+        this.closeSocket(ws, 1008, "admission timeout");
       } else {
         pendingPreAuth += 1;
       }
@@ -890,7 +878,7 @@ export class Room extends DurableObject {
     } catch {
       // ignore
     }
-    ws.close(1008, error);
+    this.closeSocket(ws, 1008, error);
   }
 
   forward(ws, att, message) {
@@ -912,19 +900,51 @@ export class Room extends DurableObject {
     return typeof att?.connectedAt === "number" ? Date.now() - att.connectedAt : "?";
   }
 
+  // One uniform line per disconnect, so "why did the connection drop" is
+  // answerable from the log. `initiator` classifies who severed it:
+  //   remote — the mac or phone sent a WebSocket close frame (a clean, app- or
+  //            user-driven disconnect); `role` says which end.
+  //   error  — a transport-level failure (abrupt drop, no close frame); the
+  //            follow-on close, if any, shows up as remote code=1006.
+  //   relay  — the relay itself severed it; `reason` is the cause (quota
+  //            exceeded, displaced, peer gone, admission timeout, ...). These
+  //            never fire webSocketClose (host/runtime.js suppresses it for
+  //            server-initiated closes), so closeSocket() is the only place they
+  //            can be logged.
+  // Unlike dlog(), this is NOT gated on RELAY_LOG: it carries no personal data
+  // (only the opaque room tag, role, close code/reason, and a duration), so it
+  // is always emitted — a disconnect must be attributable without first turning
+  // logging on and reproducing.
+  logDisconnect(initiator, att, code, reason) {
+    console.log(`relay ${tagOf(att)} disconnect initiator=${initiator} `
+      + `role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
+      + `code=${code ?? "?"}${reason ? ` reason=${reason}` : ""} `
+      + `lived=${this.livedMs(att)}ms`);
+  }
+
+  // Sever a socket the relay itself decided to close, logging it as such before
+  // handing off to the (host-wrapped) close. Swallows close() errors so callers
+  // in loops/teardown need no try/catch of their own.
+  closeSocket(target, code, reason) {
+    this.logDisconnect("relay", safeAttachment(target), code, reason);
+    try {
+      target.close(code, reason);
+    } catch {
+      // ignore
+    }
+  }
+
   async webSocketClose(ws, code, reason) {
     let att;
     try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
-    this.dlog(`relay ${tagOf(att)} close role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
-      + `code=${code ?? "?"}${reason ? ` reason=${reason}` : ""} lived=${this.livedMs(att)}ms`);
+    this.logDisconnect("remote", att, code, reason);
     this.closePeerOf(ws);
   }
 
-  async webSocketError(ws) {
+  async webSocketError(ws, err) {
     let att;
     try { att = ws.deserializeAttachment(); } catch { /* ignore */ }
-    this.dlog(`relay ${tagOf(att)} socket error role=${att?.role ?? "?"} state=${att?.state ?? "?"} `
-      + `lived=${this.livedMs(att)}ms`);
+    this.logDisconnect("error", att, undefined, err?.message);
     this.closePeerOf(ws);
   }
 
@@ -946,11 +966,7 @@ export class Room extends DurableObject {
       const a = peer.deserializeAttachment();
       if (a && a.state === "admitted" && a.role !== att.role) {
         this.dlog(`relay ${tagOf(att)} peer gone (role=${att.role}); closing ${a.role}`);
-        try {
-          peer.close(1001, "peer gone");
-        } catch {
-          // ignore
-        }
+        this.closeSocket(peer, 1001, "peer gone");
       }
     }
   }

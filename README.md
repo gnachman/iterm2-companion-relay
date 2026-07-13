@@ -7,6 +7,11 @@ pairings) is kept in SQLite and survives restarts.
 
 Runs as a single Node process behind a TLS-terminating reverse proxy.
 
+- **Deploy in one command:** from a workstation, `ops/deploy-remote.sh <host>`
+  (SSHes to `root@<host>` and runs the deploy); or on the box itself,
+  `bash ops/deploy-vps.sh ops/deploy.env`. Copy `ops/deploy.env.example` to
+  `ops/deploy.env` and fill it in first. Both scripts and the config template are
+  self-documenting.
 - **Self-host it:** see [SELF-HOSTING.md](SELF-HOSTING.md) — a guided walk-through
   for running your own relay on a VPS, with or without Cloudflare in front.
 - **Deploy (maintainer reference):** see [DEPLOY.md](DEPLOY.md).

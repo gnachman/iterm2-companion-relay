@@ -113,6 +113,25 @@ describe("(3) spliced frame size + rate caps", () => {
     }
     expect((await onClose).code).toBe(1008);
   });
+
+  it("closes BOTH legs when one floods frames, so the peer cannot half-open", async () => {
+    // A relay-initiated close does not fire webSocketClose, so the peer-close
+    // that a remote disconnect gets never runs; the flood branch must close the
+    // peer itself. Without it the flooder's leg dies while its peer keeps a
+    // healthy relay link, believes the session is up, and never reconnects.
+    const room = freshRoom();
+    const mac = await admit(room, "mac");
+    const phone = await admit(room, "phone");
+    expect(mac.result.ok).toBe(true);
+    expect(phone.result.ok).toBe(true);
+    const macClosed = closed(mac.ws);
+    const phoneClosed = closed(phone.ws);
+    for (let i = 0; i < 600; i++) {
+      try { phone.ws.send(new Uint8Array([0])); } catch { break; }
+    }
+    expect((await phoneClosed).code).toBe(1008); // flooder: frame rate exceeded
+    expect((await macClosed).code).toBe(1001);   // peer: gone
+  });
 });
 
 describe("(5) per-room daily byte quota", () => {

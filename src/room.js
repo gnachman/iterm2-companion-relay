@@ -326,6 +326,13 @@ export class Room extends DurableObject {
     const cap = att.state === "admitted" ? MAX_FRAME_BYTES : MAX_CONTROL_BYTES;
     if (size > cap) {
       this.dlog(`relay ${tagOf(att)} frame too large (${size} > ${cap}); closing`);
+      // A relay-initiated close does not fire webSocketClose (host/runtime.js
+      // suppresses it for server-initiated closes), so the webSocketClose ->
+      // closePeerOf that a remote disconnect gets never runs. Close the peer
+      // explicitly, or an admitted offender's leg dies while its peer keeps a
+      // healthy relay link, believes the session is up, and never reconnects
+      // (a half-open room the mac sits parked in forever). No-op pre-auth.
+      this.closePeerOf(ws);
       this.closeSocket(ws, 1009, "frame too large");
       return;
     }
@@ -337,7 +344,10 @@ export class Room extends DurableObject {
       case "admitted":
         // (3) Cap spliced frame rate per room.
         if (this.rateLimited(this.frameWindow, MAX_FRAMES_PER_WINDOW, FRAME_WINDOW_MS)) {
-          this.dlog(`relay ${tagOf(att)} frame rate exceeded; closing`);
+          this.dlog(`relay ${tagOf(att)} frame rate exceeded; closing both legs`);
+          // As in the frame-too-large branch above: a relay-initiated close
+          // won't fire webSocketClose, so close the peer here or it half-opens.
+          this.closePeerOf(ws);
           this.closeSocket(ws, 1008, "frame rate exceeded");
           return;
         }

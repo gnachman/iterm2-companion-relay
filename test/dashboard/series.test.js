@@ -92,6 +92,24 @@ describe("buildDashboard health (reuses monitor checks)", () => {
     expect(d.alerts.find((a) => a.key === "errors")).toBeTruthy();
   });
 
+  it("still reports the health alert after a mid-window relay restart", () => {
+    // Errors accumulate, then the relay restarts (counters reset low). The
+    // reset-aware window totals (requests 200, errors 30 -> 15%) still cross the
+    // ratio, so a restart mid-window must not suppress the alert. A newest-vs-oldest
+    // reset gate previously blanked it out (green "all clear") for the whole window
+    // while the tiles on the same page still showed the elevated ratio.
+    const rows = [
+      row(1000, { http_requests: 1000, http_errors: 100 }),
+      row(2000, { http_requests: 1200, http_errors: 130 }), // +200 req, +30 err
+      row(3000, { http_requests: 5, http_errors: 1 }),       // restart: counters reset
+    ];
+    const d = buildDashboard(rows, {
+      latest: rows[2], fromMs: 0, toMs: 4000, nowMs: 4000,
+      errorCfg: { ratioThreshold: 0.05, minRequests: 100, exceptionThreshold: 1 },
+    });
+    expect(d.alerts.find((a) => a.key === "errors")).toBeTruthy();
+  });
+
   it("stays clear when everything is nominal", () => {
     const rows = [
       row(1000, { sockets_live: 2, http_requests: 0 }),

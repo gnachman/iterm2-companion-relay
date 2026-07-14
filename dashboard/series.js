@@ -4,15 +4,17 @@
 //
 // REUSE: the relay already ships a monitor (monitor/src/monitor.js) whose pure,
 // unit-tested checks decide when to PAGE. The dashboard SHOWS the same state, so
-// it imports those very functions — capAlerts / errorAlert / exceptionAlert /
-// deltas — rather than re-deriving thresholds that could drift from what actually
-// alerts. The dashboard and the pager therefore always agree on "is this healthy".
+// it imports those very functions — capAlerts / errorAlert / exceptionAlert —
+// rather than re-deriving thresholds that could drift from what actually alerts.
+// The dashboard and the pager therefore always agree on "is this healthy".
+// Reset handling here comes from the reset-aware windowTotal/step below (not a
+// deltas() gate, which is per-interval and the wrong altitude for a window total).
 //
 // The relay's counters are cumulative and reset to ~0 on restart, so every rate
 // here is computed from RESET-AWARE adjacent deltas (a negative step is a restart,
 // not negative traffic — it contributes 0 and starts a fresh interval).
 
-import { deltas, capAlerts, errorAlert, exceptionAlert } from "../monitor/src/monitor.js";
+import { capAlerts, errorAlert, exceptionAlert } from "../monitor/src/monitor.js";
 
 // Reset-aware delta of one cumulative column between two rows.
 function step(prev, cur, field) {
@@ -133,17 +135,17 @@ export function buildDashboard(rows, {
       { key: "rooms", label: "Live rooms", used: cur.rooms_live, cap: caps.roomsCap, warnFrac: caps.warnFrac, critFrac: caps.critFrac, unit: "" },
     ]));
   }
-  // deltas() gives the reset-aware interval shape errorAlert/exceptionAlert want.
-  const d = deltas(
-    rows.length ? { requests: rows[0].http_requests, errors: rows[0].http_errors, exceptions: rows[0].exceptions } : null,
-    { requests: (cur || {}).http_requests || 0, errors: (cur || {}).http_errors || 0, exceptions: (cur || {}).exceptions || 0 },
-  );
-  if (!d.reset) {
-    const e = errorAlert({ requests, errors, ratioThreshold: errorCfg.ratioThreshold, minRequests: errorCfg.minRequests });
-    if (e) alerts.push(e);
-    const x = exceptionAlert({ count: exceptions, threshold: errorCfg.exceptionThreshold });
-    if (x) alerts.push(x);
-  }
+  // The window totals (requests/errors/exceptions) are already reset-aware:
+  // windowTotal sums per-adjacent-step deltas and clamps a restart's negative step
+  // to 0. So no whole-window reset gate is needed here. A newest-vs-oldest deltas()
+  // test would be at the wrong altitude -- it reports reset:true whenever the relay
+  // restarted anywhere in the window (a routine deploy), which would wrongly suppress
+  // BOTH health alerts for the entire range while the tiles on the same page (built
+  // from these same totals with no gate) still show the elevated values.
+  const e = errorAlert({ requests, errors, ratioThreshold: errorCfg.ratioThreshold, minRequests: errorCfg.minRequests });
+  if (e) alerts.push(e);
+  const x = exceptionAlert({ count: exceptions, threshold: errorCfg.exceptionThreshold });
+  if (x) alerts.push(x);
 
   return {
     window: { fromMs, toMs, buckets },

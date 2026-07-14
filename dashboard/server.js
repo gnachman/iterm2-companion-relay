@@ -35,8 +35,20 @@ export function createDashboard(options = {}) {
     fetchImpl: globalThis.fetch,
     now: Date.now,
     startCollectorOnListen: true,
+    allowUnauthenticated: false,
     ...options,
   };
+
+  // Fail closed: this module IS the auth boundary. requireAuth() returns true
+  // (open) when either credential is missing, so without this guard a caller that
+  // omits `user`/`pass` (or a copy-paste of this call, or a future entrypoint)
+  // would silently serve `/` and `/api/data` unauthenticated. Refuse to stand up
+  // that way unless the embedder opts in explicitly.
+  if ((!cfg.user || !cfg.pass) && !cfg.allowUnauthenticated) {
+    throw new Error(
+      "createDashboard: refusing to start without both `user` and `pass` " +
+      "(pass allowUnauthenticated: true to intentionally serve without auth).");
+  }
 
   const db = options.db || new DashboardDB(cfg.dbPath);
   const page = renderPage(); // static; built once

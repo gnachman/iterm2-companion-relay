@@ -5,6 +5,23 @@ import { DashboardDB } from "../../dashboard/db.js";
 const snap = (o = {}) => ({ ws_upgrades: 0, ws_rejected: 0, http_requests: 0, http_errors: 0, exceptions: 0, push_errors: 0, rooms_live: 0, sockets_live: 0, life_le1: 0, life_le5: 0, life_le15: 0, life_le60: 0, life_le300: 0, life_le1800: 0, life_count: 0, life_sum: 0, ...o });
 const authHeader = "Basic " + Buffer.from("admin:pw").toString("base64");
 
+describe("dashboard server auth guard", () => {
+  // createDashboard is the auth boundary; it must fail closed rather than serve
+  // /api/data unauthenticated when a credential is missing. The throw happens
+  // before any DB is opened, so these cases need no db.
+  it("refuses to start without both credentials", () => {
+    expect(() => createDashboard({ pass: "pw" })).toThrow(/without both/);
+    expect(() => createDashboard({ user: "admin" })).toThrow(/without both/);
+    expect(() => createDashboard({})).toThrow(/without both/);
+    expect(() => createDashboard({ user: "", pass: "pw" })).toThrow(/without both/);
+  });
+
+  it("serves open only with an explicit opt-in", () => {
+    const d = createDashboard({ db: new DashboardDB(":memory:"), allowUnauthenticated: true, startCollectorOnListen: false });
+    expect(d).toBeTruthy();
+  });
+});
+
 describe("dashboard server", () => {
   let dash, base, db;
 

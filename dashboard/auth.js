@@ -43,10 +43,12 @@ export function checkBasicAuth(header, user, pass) {
 
 // Guard a request: if auth is configured and the request fails it, write a 401
 // challenge and return false. Returns true when the request may proceed (either
-// auth passed, or no credentials are configured — the caller decides whether
-// unconfigured means open; the server refuses to start unconfigured).
+// auth passed, or no credentials are configured). Fail-open on missing creds is
+// safe only because createDashboard() refuses to start without both credentials
+// unless allowUnauthenticated:true is passed explicitly, so this branch is reached
+// only when the embedder deliberately opted out of auth.
 export function requireAuth(req, res, { user, pass, realm = "iTerm2 Relay Dashboard" }) {
-  if (!user || !pass) return true; // unconfigured: server-level guard handles this
+  if (!user || !pass) return true; // unconfigured: createDashboard() gated this
   const ok = checkBasicAuth(req.headers.authorization, user, pass);
   if (ok) return true;
   res.writeHead(401, {

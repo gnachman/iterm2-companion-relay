@@ -1,6 +1,8 @@
 node_modules/
 dist/
 *.log
+# Wrangler local state / scratch (Cloudflare dev); never commit
+.wrangler/
 # Stray captured terminal transcript (leaks hostname / prompts); never commit
 /output
 # SQLite state (relay pairings); never commit

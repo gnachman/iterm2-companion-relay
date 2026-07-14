@@ -224,7 +224,15 @@ export function rollHour(anchor, cur, nowHourKey) {
 // minSamples=14, which disabled anomaly detection entirely; clamp so a
 // misconfiguration can never do that again.
 export function parseConfig(env = {}) {
-  const n = (v, d) => { const x = Number(v); return Number.isFinite(x) ? x : d; };
+  // Treat a present-but-empty (or whitespace) var as unset: Number("") is 0 and
+  // Number.isFinite(0) is true, so without this a blanked var (a plausible "disable
+  // this knob" edit) would silently coerce to 0 instead of the default -- e.g.
+  // STALE_MINUTES="" -> staleMs 0 -> a false "relay not reporting" page every run.
+  const n = (v, d) => {
+    if (v == null || String(v).trim() === "") return d;
+    const x = Number(v);
+    return Number.isFinite(x) ? x : d;
+  };
   const minSamples = n(env.MIN_SAMPLES, 4);
   const maxSamples = n(env.MAX_SAMPLES, 8);
   return {

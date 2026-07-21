@@ -7,15 +7,19 @@ full walkthrough.
 
 ## Deploy to a VPS
 
-One command, config-driven and idempotent (this is also the upgrade path — re-run
-it to pull latest + restart):
+Config-driven and idempotent. Full deploy provisions packages + config + units;
+the fast update just pulls code and restarts (use it for a plain JS change).
 
-- **Remote, from a workstation:** `ops/deploy-remote.sh <host>`
+- **Full deploy, from a workstation:** `ops/deploy-remote.sh <host>`
   SSHes to `root@<host>`, copies the deploy script + your local secret-bearing
   `ops/deploy.env` to the box, runs it, and shreds the copied env afterward.
   Override the SSH user/port with `SSH_USER=` / `SSH_PORT=`.
-- **On the box itself:** `bash ops/deploy-vps.sh ops/deploy.env`
-  Works whether invoked as root (`ssh root@host`) or as a sudo user.
+- **Fast update (code only), from a workstation:** `ops/deploy-remote.sh <host> --update`
+  Runs `ops/update-vps.sh` on the box: `git pull` + `npm ci` (only if the lockfile
+  changed) + restart. No apt, no Node/Caddy install, no env/unit/Caddy rewrite,
+  no secrets sent. Use the full deploy only for first-time setup or a config change.
+- **On the box itself:** `bash ops/deploy-vps.sh ops/deploy.env` (full) or
+  `bash ops/update-vps.sh` (fast). Both work as root (`ssh root@host`) or a sudo user.
 
 **Config:** `cp ops/deploy.env.example ops/deploy.env`, then fill it in. Every
 option (origin host, App Attest, quotas, dashboard, optional metrics push, fixed

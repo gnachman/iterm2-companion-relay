@@ -27,7 +27,9 @@ DEPLOY_SH="${SCRIPT_DIR}/deploy-vps.sh"
 
 # Multiplex all SSH/scp over one authenticated connection (one prompt at most).
 CTL="$(mktemp -u "${TMPDIR:-/tmp}/iterm2-relay-ssh.XXXXXX")"
-SSH_BASE=(-p "$SSH_PORT" -o ControlMaster=auto -o ControlPath="$CTL" -o ControlPersist=120)
+# Use -o Port= (not -p): ssh's port flag is -p but scp's is -P, whereas -o Port=
+# is accepted by both.
+SSH_BASE=(-o Port="$SSH_PORT" -o ControlMaster=auto -o ControlPath="$CTL" -o ControlPersist=120)
 cleanup() { ssh "${SSH_BASE[@]}" -O exit "$TARGET" 2>/dev/null || true; }
 trap cleanup EXIT
 
@@ -35,7 +37,7 @@ echo "==> Target ${TARGET}:${SSH_PORT}   env ${ENV_FILE}"
 
 echo "==> Copying deploy script + env to ${REMOTE_DIR}"
 ssh "${SSH_BASE[@]}" "$TARGET" "mkdir -p '${REMOTE_DIR}' && chmod 700 '${REMOTE_DIR}'"
-# scp shares the master connection; -P is scp's port flag but ControlPath makes it moot.
+# scp reuses the multiplexed master connection established above.
 scp "${SSH_BASE[@]}" -q "$DEPLOY_SH" "${TARGET}:${REMOTE_DIR}/deploy-vps.sh"
 scp "${SSH_BASE[@]}" -q "$ENV_FILE"  "${TARGET}:${REMOTE_DIR}/deploy.env"
 

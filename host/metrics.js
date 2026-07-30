@@ -21,10 +21,16 @@ const COUNTER_HELP = {
   process_exceptions_total: "Process-level exceptions swallowed to keep serving.",
   metrics_push_errors_total: "Outbound metrics-push attempts that failed (network or non-2xx).",
   quota_exceeded_total: "Sockets closed because their room exceeded its daily byte quota.",
+  phone_no_mac_total: "Phones turned away because no mac was parked in their room (admit -> \"mac offline\").",
+  ws_keepalive_terminated_total: "Sockets terminated by keepalive after a missed ping/pong (dead peer or path).",
 };
 const GAUGE_HELP = {
   rooms_live: "Rooms currently resident in memory.",
   sockets_live: "WebSocket connections currently open.",
+  rooms_both: "Resident rooms with both a mac and a phone admitted (spliced).",
+  rooms_mac_only: "Resident rooms with a mac parked but no phone.",
+  rooms_phone_only: "Resident rooms with a phone admitted but no mac (should stay 0; invariant tripwire).",
+  rooms_neither: "Resident rooms with no admitted socket (pre-auth only, or idle established).",
 };
 
 export class Metrics {

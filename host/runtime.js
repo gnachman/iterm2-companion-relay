@@ -260,6 +260,35 @@ export class Runtime {
     return this.rooms.size;
   }
 
+  // Point-in-time slot occupancy across resident rooms, for /metrics. A room's
+  // admitted mac/phone lives ONLY in memory (the socket attachment; it is never
+  // written to storage), so this is the only place a question like "how many
+  // rooms have a mac parked" can be answered without a live socket to inspect.
+  // Aggregate and PII-free: counts of rooms by which role slots are filled, no
+  // tag or name. O(live sockets), computed at scrape time on the loopback-only
+  // endpoint. Note phone_only should stay ~0 (a phone cannot admit without a mac
+  // parked; room.js rejects it "mac offline"), so a nonzero value is an
+  // invariant tripwire; `neither` is a resident room with no admitted socket
+  // (pre-auth churn, or an idle established room held resident by its TTL alarm).
+  occupancy() {
+    const o = { both: 0, mac_only: 0, phone_only: 0, neither: 0 };
+    for (const ctx of this.rooms.values()) {
+      let mac = false;
+      let phone = false;
+      for (const ws of ctx._sockets) {
+        const a = ws._attachment;
+        if (!a || a.state !== "admitted") continue;
+        if (a.role === "mac") mac = true;
+        else if (a.role === "phone") phone = true;
+      }
+      if (mac && phone) o.both += 1;
+      else if (mac) o.mac_only += 1;
+      else if (phone) o.phone_only += 1;
+      else o.neither += 1;
+    }
+    return o;
+  }
+
   // Get-or-create the live context for a room, arming any persisted alarm.
   async get(roomName) {
     let ctx = this.rooms.get(roomName);

@@ -207,12 +207,22 @@ export function createRelay(options = {}) {
   const runtime = new Runtime({
     RoomClass: Room, env, backend,
     onServerClose: (code, reason) => {
-      if (code === 1008 && /quota/.test(String(reason || ""))) {
+      const r = String(reason || "");
+      if (code === 1008 && /quota/.test(r)) {
         metrics.inc("quota_exceeded_total");
+      }
+      // A phone turned away because no mac is parked (room.js admit -> reject
+      // "mac offline"). A climbing rate is the direct, aggregate signal that
+      // macs are not reaching their rooms — the failure that is otherwise only
+      // visible as a stream of per-room disconnect lines. PII-free (a count).
+      if (code === 1008 && r === "mac offline") {
+        metrics.inc("phone_no_mac_total");
       }
     },
   });
   metrics.inc("quota_exceeded_total", 0); // pre-register so it always appears
+  metrics.inc("phone_no_mac_total", 0); // pre-register so it always appears
+  metrics.inc("ws_keepalive_terminated_total", 0); // pre-register so it always appears
 
   // A falsy limit config disables that limiter entirely (mirrors the old
   // deployment where the rate-limit binding was optional): the deployment still
@@ -246,7 +256,15 @@ export function createRelay(options = {}) {
       if (url.pathname === "/metrics") {
         if (!isLocalScrape(req, headers)) return sendPlain(res, 403, "forbidden");
         res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
-        return res.end(metrics.render({ rooms_live: runtime.size, sockets_live: totalSockets }));
+        const occ = runtime.occupancy();
+        return res.end(metrics.render({
+          rooms_live: runtime.size,
+          sockets_live: totalSockets,
+          rooms_both: occ.both,
+          rooms_mac_only: occ.mac_only,
+          rooms_phone_only: occ.phone_only,
+          rooms_neither: occ.neither,
+        }));
       }
 
       const rej = entryReject(headers);
@@ -382,15 +400,35 @@ export function createRelay(options = {}) {
   // (or a proxy that silently dropped an idle connection) is detected instead
   // of pinning a dead peer. Since there is no hibernation cost, sockets stay
   // open indefinitely otherwise.
+  // One keepalive sweep: reap sockets that missed the previous cycle's pong,
+  // then ping the rest. Factored out of the interval so a test can invoke a
+  // single sweep deterministically (a real dead-peer terminate is otherwise
+  // timing-dependent, and the ws client auto-pongs so it never "misses").
+  function sweepKeepalive() {
+    for (const ws of wss.clients) {
+      if (ws.isAlive === false) {
+        // Missed a full ping/pong cycle: the peer (or its network path) is
+        // dead. This is the ONLY place the cause is known — terminate() reaches
+        // room.js as a generic remote 1006, indistinguishable from an upstream
+        // reset (Caddy dropping an idle proxied leg), so record it HERE.
+        // Always-on and PII-safe: opaque tag + role + duration, no room name /
+        // IP / content.
+        const att = ws._attachment;
+        const tag = (att && att.tag) || "????????";
+        const lived = ws._openedAt ? Date.now() - ws._openedAt : "?";
+        console.log(`relay ${tag} keepalive no-pong; terminating `
+          + `role=${(att && att.role) || "?"} lived=${lived}ms`);
+        metrics.inc("ws_keepalive_terminated_total");
+        ws.terminate();
+        continue;
+      }
+      ws.isAlive = false;
+      try { ws.ping(); } catch { /* ignore */ }
+    }
+  }
   let keepaliveTimer = null;
   function startKeepalive() {
-    keepaliveTimer = setInterval(() => {
-      for (const ws of wss.clients) {
-        if (ws.isAlive === false) { ws.terminate(); continue; }
-        ws.isAlive = false;
-        try { ws.ping(); } catch { /* ignore */ }
-      }
-    }, cfg.keepaliveMs);
+    keepaliveTimer = setInterval(sweepKeepalive, cfg.keepaliveMs);
     keepaliveTimer.unref?.();
   }
 
@@ -416,6 +454,8 @@ export function createRelay(options = {}) {
     runtime,
     backend,
     metrics,
+    // Test hook: run one keepalive sweep synchronously (see sweepKeepalive).
+    _sweepKeepalive: sweepKeepalive,
     async listen(port, host) {
       await runtime.rehydrate();
       await new Promise((resolve, reject) => {

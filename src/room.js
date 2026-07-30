@@ -299,7 +299,7 @@ export class Room extends DurableObject {
     // (1) Bound simultaneous un-admitted sockets, and arm the deadline sweep.
     this.evictExcessPreAuth(tag);
     await this.ensureAlarm();
-    this.dlog(`relay ${tag} connect`);
+    this.logLifecycle("connect", { tag });
   }
 
   async handleHttp(request, url) {
@@ -539,8 +539,8 @@ export class Room extends DurableObject {
       const a = s.deserializeAttachment();
       return a && a.state === "admitted" && a.role !== role;
     });
-    this.dlog(`relay ${tagOf(prev)} admit role=${role} via=${via} peer=${peerPresent}`
-      + (peerPresent ? " (spliced)" : ""));
+    this.logLifecycle("admit", { tag: prev.tag, role },
+      `via=${via} peer=${peerPresent}${peerPresent ? " (spliced)" : ""}`);
     const result = { ok: true };
     if (role === "phone") {
       // Mint a one-time registration token the phone presents to /register to
@@ -908,6 +908,23 @@ export class Room extends DurableObject {
   // (self-eviction/displacement vs. an idle reap the keepalive is not covering).
   livedMs(att) {
     return typeof att?.connectedAt === "number" ? Date.now() - att.connectedAt : "?";
+  }
+
+  // Always-on lifecycle logging — the companion to logDisconnect for the START
+  // and admission of a socket's life. Same posture and same rationale as
+  // logDisconnect: a pairing's connect -> park -> disconnect timeline must be
+  // reconstructable from the log WITHOUT first enabling RELAY_LOG and
+  // reproducing. A SUCCESSFUL park previously produced no line at all, so a mac
+  // that parked and then went silent (its socket severed without the close ever
+  // reaching it) was invisible — the "mac says connected, phone can't find it"
+  // case. Carries no personal data: only the opaque room tag, role, and
+  // non-identifying event detail (admission mode, peer-present, duration) —
+  // never a room name, IP, key id, or content. Unlike dlog(), NOT gated on
+  // RELAY_LOG.
+  logLifecycle(event, att, extra = "") {
+    console.log(`relay ${tagOf(att)} ${event}`
+      + (att && att.role ? ` role=${att.role}` : "")
+      + (extra ? ` ${extra}` : ""));
   }
 
   // One uniform line per disconnect, so "why did the connection drop" is

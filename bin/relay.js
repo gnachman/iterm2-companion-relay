@@ -108,6 +108,23 @@ async function shutdown(signal) {
 process.on("SIGTERM", () => shutdown("SIGTERM"));
 process.on("SIGINT", () => shutdown("SIGINT"));
 
+// Runtime diagnostics toggle: flip verbose per-event logging (RELAY_LOG) on/off
+// WITHOUT a restart, so a live incident can be traced without dropping every
+// parked socket — a restart is exactly the mass reconnect the relay exists to
+// avoid. room.js reads env.RELAY_LOG === "true" per call and env IS process.env
+// here, so mutating it takes effect on the next event. Park / connect /
+// disconnect / keepalive lifecycle logging is always-on regardless; this only
+// toggles the finer dlog detail (hello, displacement, reject reasons,
+// evictions). Send with `kill -USR2 <pid>` or `systemctl kill -s USR2 <unit>`.
+// SIGUSR2 (not SIGUSR1) deliberately: Node reserves SIGUSR1 to start the V8
+// inspector, and a JS listener does not suppress that — using it would open a
+// debug port on the hardened process as a side effect.
+process.on("SIGUSR2", () => {
+  const enabling = process.env.RELAY_LOG !== "true";
+  process.env.RELAY_LOG = enabling ? "true" : "false";
+  console.log(`relay: SIGUSR2 -> verbose RELAY_LOG ${enabling ? "enabled" : "disabled"}`);
+});
+
 relay.listen(PORT, HOST).then(() => {
   const { port } = relay.address();
   // Non-identifying startup line only (no rooms, no IPs): honors the zero-PII

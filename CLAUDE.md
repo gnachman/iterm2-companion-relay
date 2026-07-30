@@ -41,6 +41,13 @@ terminating TLS (Let's Encrypt) → relay, with the dashboard under `/dashboard/
 Current production instance: `relay1.iterm2.com` (Option A — Caddy + Let's Encrypt,
 gray-cloud DNS-only, IPv4-only).
 
+## Troubleshoot
+
+`docs/TROUBLESHOOTING.md` — field guide for a live pairing that "won't connect"
+(the two-leg Mac↔Caddy↔node topology, the room tag, `/metrics` occupancy +
+`phone_no_mac_total`, the always-on connect/park/disconnect log lines, the `ss`
+leg-balance check, and `SIGUSR1` to toggle verbose `RELAY_LOG` without a restart).
+
 ## Test
 
 `npm test` — vitest, all in plain Node.

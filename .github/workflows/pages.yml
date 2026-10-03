@@ -1,0 +1,43 @@
+# Mirror the shard map to GitHub Pages as a fallback for clients that cannot
+# reach resolver.iterm2.com (Cloudflare). Publishes only shardmap.json, so the
+# rest of the repo is not served as a site. URL:
+#   https://gnachman.github.io/iterm2-companion-relay/shardmap.json
+name: Publish shard map to Pages
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - resolver/src/shardmap.json
+      - .github/workflows/pages.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate and stage shard map
+        run: |
+          python3 -c 'import json,sys; m=json.load(open("resolver/src/shardmap.json")); assert isinstance(m["version"], int) and m["ranges"], "bad map"'
+          mkdir -p site
+          cp resolver/src/shardmap.json site/shardmap.json
+          touch site/.nojekyll
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deployment
+        uses: actions/deploy-pages@v4

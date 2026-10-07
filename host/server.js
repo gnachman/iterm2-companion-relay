@@ -205,17 +205,29 @@ function abortUpgrade(socket, status, message) {
 // The distributed-mode shard-map GET. Direct HTTPS to the CDN; the on-box proxy
 // is not in this path. Injected in tests via cfg.fetchText.
 //
-// Bounded by an abort timeout well under the poll interval: without it a
-// blackholed path (silent packet drop) leaves the fetch hanging until the OS TCP
-// timeout (~minutes) with NO error thrown and NO counter bump the whole time --
-// the single worst case for after-the-fact diagnosis. A non-2xx carries the
-// status and Cloudflare's cf-ray so an edge/Worker error is later attributable.
-const SHARDMAP_FETCH_TIMEOUT_MS = 8_000; // must stay < SHARDMAP_POLL_INTERVAL_MS (10s)
-async function defaultFetchText(url) {
+// Each attempt is bounded by an abort timeout well under the poll interval:
+// without it a blackholed path (silent packet drop) leaves the fetch hanging
+// until the OS TCP timeout (~minutes) with NO error thrown and NO counter bump
+// the whole time -- the single worst case for after-the-fact diagnosis. A
+// non-2xx carries the status and Cloudflare's cf-ray so an edge/Worker error is
+// later attributable.
+//
+// A failed attempt is retried on a FRESH connection because the dominant failure
+// in the field is per-packet loss on one box's path to the CDN (measured
+// 2026-10-07: relay1 ~0.25% of attempts stalled to the abort and ~1% ran 1.5-8s,
+// while relay2 on the same provider was clean; the loss is independent of address
+// family, so a v4/v6 pin does not help). Loss is probabilistic per connection, so
+// a fresh attempt almost always lands clean: retrying collapses the counted-
+// failure rate without masking a real outage (which fails every attempt). The
+// attempts sum to < the poll interval so successive polls never overlap.
+const SHARDMAP_FETCH_ATTEMPT_TIMEOUT_MS = 3_000;
+const SHARDMAP_FETCH_ATTEMPTS = 3; // 3 x 3s = 9s worst case, < SHARDMAP_POLL_INTERVAL_MS (10s)
+
+async function fetchShardMapOnce(url, { timeoutMs, fetchImpl }) {
   const ac = new AbortController();
-  const timer = setTimeout(() => ac.abort(), SHARDMAP_FETCH_TIMEOUT_MS);
+  const timer = setTimeout(() => ac.abort(), timeoutMs);
   try {
-    const r = await fetch(url, { signal: ac.signal });
+    const r = await fetchImpl(url, { signal: ac.signal });
     if (!r.ok) {
       const err = new Error(`shardmap HTTP ${r.status}`);
       err.httpStatus = r.status;
@@ -226,6 +238,44 @@ async function defaultFetchText(url) {
   } finally {
     clearTimeout(timer);
   }
+}
+
+// A 4xx is a definitive client/config fault (WAF, bad URL): repeating the same
+// GET only reproduces it, so give up immediately and surface it. Everything else
+// -- an abort (timeout), a network error (conn/dns/tls), or a 5xx edge blip -- is
+// transient and worth a fresh-connection retry. Exported for tests.
+export function shouldRetryShardFetch(error) {
+  const s = error && error.httpStatus;
+  if (typeof s === "number" && s >= 400 && s < 500) return false;
+  return true;
+}
+
+// Fetch the shard map, retrying a transient failure on a fresh connection up to
+// `attempts` times. Throws the LAST error if every attempt fails, so the poller
+// records exactly one failure per poll and classifyShardFetchError still
+// attributes it. `onRetry(error, attempt)` fires once per absorbed failure (for
+// the retries counter). Exported for tests.
+export async function fetchShardMapWithRetry(url, {
+  attempts = SHARDMAP_FETCH_ATTEMPTS,
+  timeoutMs = SHARDMAP_FETCH_ATTEMPT_TIMEOUT_MS,
+  fetchImpl = fetch,
+  onRetry,
+} = {}) {
+  let last;
+  for (let attempt = 1; attempt <= attempts; attempt++) {
+    try {
+      return await fetchShardMapOnce(url, { timeoutMs, fetchImpl });
+    } catch (error) {
+      last = error;
+      if (attempt >= attempts || !shouldRetryShardFetch(error)) break;
+      if (onRetry) onRetry(error, attempt);
+    }
+  }
+  throw last;
+}
+
+async function defaultFetchText(url) {
+  return fetchShardMapWithRetry(url);
 }
 
 // Walk an error's .cause chain for the first errno-style code (undici hides the
@@ -304,6 +354,7 @@ export function createRelay(options = {}) {
   metrics.inc("quota_exceeded_total", 0); // pre-register so it always appears
   metrics.inc("phone_no_mac_total", 0); // pre-register so it always appears
   metrics.inc("ws_keepalive_terminated_total", 0); // pre-register so it always appears
+  metrics.inc("shard_map_fetch_retries_total", 0); // pre-register so it always appears
 
   // A falsy limit config disables that limiter entirely (mirrors the old
   // deployment where the rate-limit binding was optional): the deployment still
@@ -375,7 +426,11 @@ export function createRelay(options = {}) {
     shardStore = new ShardMapStore({ selfHost: cfg.selfHost });
     shardPoller = new ShardMapPoller({
       url: cfg.shardMapUrl,
-      fetchText: cfg.fetchText || defaultFetchText,
+      // Each poll retries a transient failure on a fresh connection (see
+      // fetchShardMapWithRetry); a climbing retries_total with a flat errors_total
+      // is the "path is lossy but retries absorb it" signal.
+      fetchText: cfg.fetchText || ((url) =>
+        fetchShardMapWithRetry(url, { onRetry: () => metrics.inc("shard_map_fetch_retries_total") })),
       store: shardStore,
       onAdopt: (map, diff) => {
         metrics.inc("shard_map_reloads_total");

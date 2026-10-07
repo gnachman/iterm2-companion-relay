@@ -4,7 +4,12 @@
 // end-to-end wiring (per-cause counter + always-on throttled log).
 
 import { describe, it, expect, vi } from "vitest";
-import { createRelay, classifyShardFetchError } from "../../host/server.js";
+import {
+  createRelay,
+  classifyShardFetchError,
+  shouldRetryShardFetch,
+  fetchShardMapWithRetry,
+} from "../../host/server.js";
 
 const N = 65536;
 const MAP_JSON = JSON.stringify({
@@ -116,6 +121,103 @@ describe("shard-map fetch-failure wiring", () => {
       const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
       expect(logged).toMatch(/shardmap fetch FAILING cause=timeout/);
       expect(logged).toMatch(/shardmap fetch RECOVERED after streak=1 over \d+s/);
+    } finally {
+      await relay.close();
+      warn.mockRestore();
+    }
+  });
+});
+
+// A minimal Response-like for a fake fetchImpl (undici Response shape the GET uses).
+const okResp = (body) => ({ ok: true, status: 200, headers: { get: () => "" }, text: async () => body });
+const httpResp = (status) => ({ ok: false, status, headers: { get: () => "" } });
+
+describe("shouldRetryShardFetch", () => {
+  it("does not retry a definitive 4xx (WAF / bad URL -- a retry only repeats it)", () => {
+    expect(shouldRetryShardFetch(httpErr(403))).toBe(false);
+    expect(shouldRetryShardFetch(httpErr(404))).toBe(false);
+  });
+  it("retries aborts, network errors, and 5xx (transient, a fresh connection may dodge it)", () => {
+    const abort = new Error("aborted"); abort.name = "AbortError";
+    expect(shouldRetryShardFetch(abort)).toBe(true);
+    expect(shouldRetryShardFetch(fetchFailed("ETIMEDOUT"))).toBe(true);
+    expect(shouldRetryShardFetch(fetchFailed("ECONNRESET"))).toBe(true);
+    expect(shouldRetryShardFetch(httpErr(503))).toBe(true);
+  });
+});
+
+describe("fetchShardMapWithRetry", () => {
+  it("returns the first success without retrying", async () => {
+    let calls = 0;
+    const fetchImpl = async () => { calls += 1; return okResp("MAP"); };
+    const onRetry = vi.fn();
+    expect(await fetchShardMapWithRetry("u", { fetchImpl, onRetry })).toBe("MAP");
+    expect(calls).toBe(1);
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+
+  it("absorbs a transient failure on a fresh attempt and succeeds", async () => {
+    let calls = 0;
+    const fetchImpl = async () => { calls += 1; if (calls < 2) throw fetchFailed("ETIMEDOUT"); return okResp("MAP"); };
+    const onRetry = vi.fn();
+    expect(await fetchShardMapWithRetry("u", { fetchImpl, onRetry, attempts: 3 })).toBe("MAP");
+    expect(calls).toBe(2);
+    expect(onRetry).toHaveBeenCalledTimes(1);
+  });
+
+  it("throws the last error after exhausting attempts (one failure surfaced, not N)", async () => {
+    let calls = 0;
+    const fetchImpl = async () => { calls += 1; throw fetchFailed("ETIMEDOUT"); };
+    const onRetry = vi.fn();
+    await expect(fetchShardMapWithRetry("u", { fetchImpl, onRetry, attempts: 3 })).rejects.toThrow();
+    expect(calls).toBe(3);
+    expect(onRetry).toHaveBeenCalledTimes(2); // fired between the 3 attempts, not on the final give-up
+  });
+
+  it("does not retry a 4xx", async () => {
+    let calls = 0;
+    const fetchImpl = async () => { calls += 1; return httpResp(403); };
+    const onRetry = vi.fn();
+    await expect(fetchShardMapWithRetry("u", { fetchImpl, onRetry, attempts: 3 }))
+      .rejects.toMatchObject({ httpStatus: 403 });
+    expect(calls).toBe(1);
+    expect(onRetry).not.toHaveBeenCalled();
+  });
+});
+
+describe("shard-map fetch retry wiring (through the poller)", () => {
+  it("a transient blip a retry absorbs is NOT counted as a fetch failure", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let n = 0;
+    // boot (n=1) succeeds; the manual poll's first attempt (n=2) fails, retry (n=3) succeeds.
+    const fetchImpl = async () => { n += 1; if (n === 2) throw fetchFailed("ETIMEDOUT"); return okResp(MAP_JSON); };
+    const { relay, base } = await boot((url) => fetchShardMapWithRetry(url, { fetchImpl, attempts: 3 }));
+    try {
+      await relay.shardPoller.fetchOnce();
+      const text = await (await fetch(base + "/metrics")).text();
+      expect(text).toMatch(/relay_shard_map_fetch_errors_total 0\b/);
+      const logged = warn.mock.calls.map((c) => c.join(" ")).join("\n");
+      expect(logged).not.toMatch(/FAILING/);
+    } finally {
+      await relay.close();
+      warn.mockRestore();
+    }
+  });
+
+  it("counts exactly one failure (one FAILING line) when every attempt fails", async () => {
+    const warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+    let boot0 = true;
+    const fetchImpl = async () => {
+      if (boot0) { boot0 = false; return okResp(MAP_JSON); }
+      throw fetchFailed("ETIMEDOUT");
+    };
+    const { relay, base } = await boot((url) => fetchShardMapWithRetry(url, { fetchImpl, attempts: 3 }));
+    try {
+      await relay.shardPoller.fetchOnce(); // all 3 attempts fail -> one counted failure
+      const text = await (await fetch(base + "/metrics")).text();
+      expect(text).toMatch(/relay_shard_map_fetch_errors_total 1\b/);
+      const failing = warn.mock.calls.map((c) => c.join(" ")).filter((l) => /FAILING/.test(l));
+      expect(failing).toHaveLength(1);
     } finally {
       await relay.close();
       warn.mockRestore();

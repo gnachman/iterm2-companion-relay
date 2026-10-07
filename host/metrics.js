@@ -25,8 +25,9 @@ const COUNTER_HELP = {
   ws_keepalive_terminated_total: "Sockets terminated by keepalive after a missed ping/pong (dead peer or path).",
   shard_reject_total: "Requests rejected because this box does not own the bucket (reject-on-doubt).",
   shard_map_reloads_total: "Shard-map versions adopted (distributed mode).",
-  shard_map_fetch_errors_total: "Shard-map fetches that failed (kept last-known-good).",
+  shard_map_fetch_errors_total: "Shard-map fetch polls that failed after all retries (kept last-known-good).",
   shard_map_fetch_errors_by_cause_total: "Shard-map fetch failures by cause (dns/timeout/conn/tls/http_5xx/http_4xx/parse/other), for attributing an outage after the fact.",
+  shard_map_fetch_retries_total: "Shard-map fetch attempts retried after a transient failure (per-attempt; a climbing rate with a flat errors_total means the path is lossy but retries are absorbing it).",
 };
 const GAUGE_HELP = {
   rooms_live: "Rooms currently resident in memory.",

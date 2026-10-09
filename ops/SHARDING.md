@@ -82,7 +82,7 @@ failing open; do not roll the fleet during a resolver outage.
 
 Every reshard is the same operator motion; only the range edit differs.
 
-1. Edit `resolver/src/shardmap.json`: move ranges, **bump `version`**.
+1. Edit `resolver/public/shardmap.json`: move ranges, **bump `version`**.
    Prefer minimal-churn edits (split or merge with a neighbor, design §7.5)
    over re-dealing the whole ring.
 2. `cd resolver && npm run deploy`, then verify:

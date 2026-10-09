@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "description": "Cloudflare Worker that serves the resolved-mode shard map (shardmap.json) at the edge, embedded in the Worker source. No R2/KV, free plan, no origin fallthrough.",
+  "description": "Assets-only Cloudflare Worker that serves the resolved-mode shard map (shardmap.json) as a static asset at the edge. No script, no bindings, free plan, no origin fallthrough.",
   "scripts": {
     "deploy": "wrangler deploy",
     "dev": "wrangler dev"

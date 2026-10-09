@@ -8,7 +8,7 @@ on:
   push:
     branches: [main]
     paths:
-      - resolver/src/shardmap.json
+      - resolver/public/shardmap.json
       - .github/workflows/pages.yml
   workflow_dispatch:
 
@@ -31,9 +31,9 @@ jobs:
       - uses: actions/checkout@v4
       - name: Validate and stage shard map
         run: |
-          python3 -c 'import json,sys; m=json.load(open("resolver/src/shardmap.json")); assert isinstance(m["version"], int) and m["ranges"], "bad map"'
+          python3 -c 'import json,sys; m=json.load(open("resolver/public/shardmap.json")); assert isinstance(m["version"], int) and m["ranges"], "bad map"'
           mkdir -p site
-          cp resolver/src/shardmap.json site/shardmap.json
+          cp resolver/public/shardmap.json site/shardmap.json
           touch site/.nojekyll
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3

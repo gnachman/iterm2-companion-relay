@@ -1,26 +1,33 @@
-# iTerm2 shard-map resolver (Cloudflare Worker)
+# iTerm2 shard-map resolver (Cloudflare static asset)
 
-Serves the resolved-mode shard map at **`https://resolver.iterm2.com/shardmap.json`**,
-entirely at the Cloudflare edge. The document is **embedded in the Worker
-bundle** (`src/shardmap.json`, inlined at build time) — no R2, no KV, no origin
+Serves the resolved-mode shard map at **`https://resolver.iterm2.com/shardmap.json`**
+as a **static asset** at the Cloudflare edge: an assets-only Worker (no script)
+whose only content is `public/shardmap.json`. No R2, no KV, no origin
 dependency, so it stays up even if the web server is down.
+
+## Why a static asset, not a Worker script
+
+Until 2026-10-09 this was a Worker script that returned the map from inside its
+own bundle. Every request ran the script and counted toward the free plan's
+100k/day Workers request limit; client and relay polling exceeded it, and
+Cloudflare answered `429` (`error code: 1027`) until the daily reset. Static
+asset requests that run no script are free and unlimited, which is what the
+design assumed all along (design §6.3: "a tiny static asset on a CDN is
+effectively always-available and unlimited-throughput"). **Do not add a `main`
+script back**: any script on this route puts every request back under the cap.
 
 ## Properties
 
-- **Live in seconds.** A Worker deploy propagates globally in seconds, and
-  Cloudflare does not edge-cache a Worker's own response, so a redeploy is served
-  immediately at the edge. (`Cache-Control: max-age=5` is the hint to
-  *downstream* HTTP caches; the relays' fetcher does not use an HTTP cache, so
-  they get fresh content on their next poll. See "Caching" below.)
+- **Live in seconds.** `wrangler deploy` uploads a new asset version and
+  switches to it atomically, so a redeploy is served at the edge in seconds.
 - **No origin fallthrough.** The whole `resolver.iterm2.com/*` subdomain routes
-  to the Worker, which answers every request itself (200 for `/shardmap.json`,
-  404 for any other path, 405 for non-GET/HEAD). Nothing ever reaches the origin.
-- **Free plan, cannot bill.** Just the Worker + the embedded JSON: no KV, R2,
-  Durable Objects, Queues, or observability. On the free plan, requests over the
-  daily limit are throttled, never charged.
-- **Correct HTTP.** `Content-Type: application/json`, a strong SHA-256 `ETag`,
-  `304` on a matching `If-None-Match`, `HEAD` supported, `405` (with `Allow`) for
-  other methods.
+  to the Worker. `/shardmap.json` is a 200; any other path is a 404 from the
+  asset layer (`not_found_handling: "none"`). Nothing ever reaches the origin.
+- **Free, unlimited, cannot bill.** No script, no KV, R2, Durable Objects,
+  Queues, or observability.
+- **Correct HTTP.** `Content-Type: application/json` (from the extension), an
+  `ETag` with `304` on a matching `If-None-Match`, and `HEAD`, all provided by
+  the asset layer. `Cache-Control` comes from `public/_headers`.
 
 ## One-time setup
 
@@ -33,7 +40,7 @@ dependency, so it stays up even if the web server is down.
 
 2. **DNS.** Worker routes only run on *proxied* traffic, so `resolver.iterm2.com`
    needs a proxied DNS record. It never actually serves from the origin (the
-   Worker answers everything), so point it at a dummy address:
+   asset Worker answers everything), so point it at a dummy address:
 
    > In the Cloudflare dashboard for `iterm2.com` -> DNS -> Add record:
    > **A** · name `resolver` · IPv4 `192.0.2.1` · **Proxied (orange cloud)**.
@@ -55,7 +62,7 @@ Wrangler will confirm the route `resolver.iterm2.com/*` on zone `iterm2.com`.
 
 Editing the document does **not** touch code:
 
-1. Edit **`src/shardmap.json`** and **bump `"version"`** (it must strictly
+1. Edit **`public/shardmap.json`** and **bump `"version"`** (it must strictly
    increase — relays and clients ignore a same-or-lower version, by design).
 2. `npm run deploy`.
 
@@ -65,7 +72,7 @@ Live within seconds. Verify:
 curl -i https://resolver.iterm2.com/shardmap.json
 ```
 
-> The committed `src/shardmap.json` is a **template** (hosts `relay1.iterm2.com` /
+> The committed `public/shardmap.json` is a **template** (hosts `relay1.iterm2.com` /
 > `relay2.iterm2.com`, 50/50). Replace the `host` values with your real relay
 > authorities before pointing clients at it. Each `host` is a bare authority
 > (lowercase `host` or `host:port`, no scheme/path), and must byte-match that
@@ -76,10 +83,9 @@ the relays set `RELAY_SHARDMAP_URL=https://resolver.iterm2.com/shardmap.json`.
 
 ## Caching (`max-age=5` is a design invariant, not a tuning knob)
 
-- **The edge does not cache the Worker's response** — the Worker runs on every
-  request and returns the currently-deployed document. So a redeploy is live at
-  the edge in seconds.
-- `Cache-Control: public, max-age=5` is the value the design mandates (§6.3,
+- Each deploy is a new asset version, served immediately, so a redeploy is
+  live at the edge in seconds.
+- `Cache-Control: public, max-age=5` (set in `public/_headers`) is the value the design mandates (§6.3,
   Appendix C), and it is load-bearing for the **client** re-resolve path. On a
   reshard the losing relay evicts a room with WS 4421 (or rejects with HTTP 421)
   and the client "forces a map refresh", but the client fetches the map with an
@@ -94,8 +100,8 @@ the relays set `RELAY_SHARDMAP_URL=https://resolver.iterm2.com/shardmap.json`.
 ## Files
 
 ```
-wrangler.jsonc     route (whole subdomain), workers_dev off, no bindings
-src/worker.js      the Worker (serve / 304 / 405 / 404); imports the JSON
-src/shardmap.json  the document (edit this; bump version; redeploy)
-package.json       wrangler devDependency + deploy script
+wrangler.jsonc         route (whole subdomain), assets dir, workers_dev off, no script
+public/shardmap.json   the document (edit this; bump version; redeploy)
+public/_headers        Cache-Control: public, max-age=5 for /shardmap.json
+package.json           wrangler devDependency + deploy script
 ```

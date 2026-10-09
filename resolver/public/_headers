@@ -1,0 +1,4 @@
+# max-age=5 is a design invariant (design §6.3, Appendix C; see README "Caching").
+# No stale-while-revalidate: a stale map during a reshard is exactly wrong.
+/shardmap.json
+  Cache-Control: public, max-age=5

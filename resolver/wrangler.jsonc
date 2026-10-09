@@ -1,24 +1,28 @@
 {
-  // iTerm2 shard-map resolver: a Cloudflare Worker that serves the resolved-mode
-  // shard map (src/shardmap.json, embedded in the Worker bundle) at the edge.
-  // No R2, no KV, no build step. See README.md and src/worker.js.
+  // iTerm2 shard-map resolver: an assets-only Cloudflare Worker that serves the
+  // resolved-mode shard map (public/shardmap.json) as a static asset at the edge.
+  // There is deliberately NO Worker script ("main"): static-asset requests that
+  // run no script are free and do not count toward the Workers daily request
+  // limit. A script-based Worker hit the free plan's 100k/day cap on 2026-10-09
+  // and the resolver returned 429 (error 1027) until the daily reset. See README.md.
   "name": "iterm2-resolver",
-  "main": "src/worker.js",
   "compatibility_date": "2026-07-01",
 
+  "assets": {
+    "directory": "./public",
+    // Any path other than a file in public/ is a plain 404 from the asset
+    // layer; nothing falls through to the origin.
+    "not_found_handling": "none"
+  },
+
   // Route the WHOLE subdomain to this Worker (not just /shardmap.json) so a
-  // request can never fall through to the origin: the Worker answers every path
-  // (200 for /shardmap.json, 404 otherwise). Worker routes only run on PROXIED
-  // (orange-cloud) traffic, so resolver.iterm2.com needs a proxied DNS record
-  // (see README "DNS"). zone_name lets wrangler resolve the zone id.
+  // request can never fall through to the origin. Worker routes only run on
+  // PROXIED (orange-cloud) traffic, so resolver.iterm2.com needs a proxied DNS
+  // record (see README "DNS"). zone_name lets wrangler resolve the zone id.
   "routes": [
     { "pattern": "resolver.iterm2.com/*", "zone_name": "iterm2.com" }
   ],
 
   // No *.workers.dev endpoint: reachable ONLY via the route above.
   "workers_dev": false
-
-  // Deliberately NO kv_namespaces / r2_buckets / durable_objects / queues and NO
-  // observability: none of those exist here, so nothing in this Worker can bill.
-  // On the free plan, requests over the daily limit are throttled, never charged.
 }

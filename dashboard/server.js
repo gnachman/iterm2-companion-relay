@@ -21,6 +21,8 @@ const RANGE_MS = {
 export function createDashboard(options = {}) {
   const cfg = {
     dbPath: ":memory:",
+    // The companion relay's loopback /metrics. Empty string disables the relay
+    // collector and drops the relay section (a push-relay-only host).
     metricsUrl: "http://127.0.0.1:8788/metrics",
     // The self-hosted push relay's loopback /metrics. Empty string disables the
     // push collector and drops the push section from the payload.
@@ -67,11 +69,13 @@ export function createDashboard(options = {}) {
     const fromMs = nowMs - span;
     // More buckets for wider ranges, but bounded so a 30d query stays cheap.
     const buckets = Math.min(cfg.buckets, Math.max(60, Math.round(span / cfg.scrapeIntervalMs)));
-    const rows = db.range(fromMs, toMs);
-    const latest = db.latest();
-    const payload = buildDashboard(rows, {
-      latest, fromMs, toMs, buckets, nowMs, caps: cfg.caps, errorCfg: cfg.errorCfg,
-    });
+    // Relay disabled: an empty shell the page recognizes (relay_enabled=false)
+    // and renders as push-only, rather than a permanently stale relay section.
+    const payload = cfg.metricsUrl
+      ? buildDashboard(db.range(fromMs, toMs), {
+          latest: db.latest(), fromMs, toMs, buckets, nowMs, caps: cfg.caps, errorCfg: cfg.errorCfg,
+        })
+      : { window: { fromMs, toMs, buckets }, alerts: [], tiles: null, series: null, relay_enabled: false };
     // Push section, only when push collection is enabled. Absent -> the page
     // simply doesn't render the push tiles/charts.
     if (cfg.pushMetricsUrl) {
@@ -122,15 +126,17 @@ export function createDashboard(options = {}) {
         server.listen(port, host, () => {
           server.removeListener("error", reject);
           if (cfg.startCollectorOnListen) {
-            stopCollector = startCollector({
-              db,
-              url: cfg.metricsUrl,
-              intervalMs: cfg.scrapeIntervalMs,
-              retentionMs: cfg.retentionMs,
-              fetchImpl: cfg.fetchImpl,
-              now: cfg.now,
-              onError: cfg.onError,
-            });
+            if (cfg.metricsUrl) {
+              stopCollector = startCollector({
+                db,
+                url: cfg.metricsUrl,
+                intervalMs: cfg.scrapeIntervalMs,
+                retentionMs: cfg.retentionMs,
+                fetchImpl: cfg.fetchImpl,
+                now: cfg.now,
+                onError: cfg.onError,
+              });
+            }
             if (cfg.pushMetricsUrl) {
               stopPushCollector = startCollector({
                 db,

@@ -42,6 +42,28 @@ placeholders (`<DOMAIN>`, `<SUBPATH>`, etc.).
   one self-contained HTML document — inline CSS/JS/SVG, no external requests — so
   it renders with no CDN reachability.
 
+## Push relay section
+
+When `DASHBOARD_PUSH_METRICS_URL` is set, a second collector scrapes the push
+relay (`pushrelay_*`) into its own `push_samples` table, so a push-relay outage
+never reads as a relay one. It shows:
+
+- **Success vs failure per minute** — delivered against `push_failed` (our side
+  or Apple's); client faults (bad secret, unknown token) are not failures.
+  *APNs success* is delivered ÷ (delivered + failed) over the range.
+- **APNs latency p50 / p95** — estimated from the histogram's bucket deltas
+  (linear interpolation, like Prometheus' `histogram_quantile`). Anything slower
+  than the last bucket (10 s) reports as 10 s.
+- **Connection health** — timeouts, reconnects (with throttled and discarded
+  counts), open sessions and the oldest one's age. Timeouts and a climbing
+  reconnect rate are the signature of a dead connection to Apple.
+- **Rejected by Apple** — total with the top reasons in the note.
+- **Last delivery** — age of the last accepted push, as of the newest sample. It
+  reads "none yet" until a push succeeds after a push-relay restart.
+
+Upgrades add the new columns automatically (`ensureColumns`); existing history is
+kept.
+
 ## Security posture
 
 - **Loopback only.** Node never listens on a public interface. The reverse proxy
@@ -79,7 +101,7 @@ Tests live in `test/dashboard/`; run `npm test`.
 | `DASHBOARD_USER` | `admin` | Basic-auth username |
 | `DASHBOARD_PASSWORD` | *(required)* | Basic-auth password — refuses to start if unset |
 | `DASHBOARD_DB` | `dashboard.db` | SQLite path (point at a writable state dir) |
-| `DASHBOARD_METRICS_URL` | `http://127.0.0.1:8788/metrics` | The relay's loopback metrics endpoint |
+| `DASHBOARD_METRICS_URL` | `http://127.0.0.1:8788/metrics` | The relay's loopback metrics endpoint. **Set empty** on a host that runs only the push relay: the relay collector and section are dropped and the page becomes "iTerm2 Push Relay" |
 | `DASHBOARD_PUSH_METRICS_URL` | `http://127.0.0.1:8790/metrics` | The push relay's loopback metrics (set empty to hide the Push relay section) |
 | `DASHBOARD_SCRAPE_MS` | `30000` | Scrape interval |
 | `DASHBOARD_RETENTION_DAYS` | `90` | Age at which old samples are pruned |

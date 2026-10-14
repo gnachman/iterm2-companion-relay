@@ -190,6 +190,10 @@ const CHARTS = [
 ];
 
 // --- push relay: tiles + charts (rendered from data.push when present) --------
+const fmtMs = (n) => n == null ? "—" : n >= 1000 ? (n / 1000).toFixed(2) + "s" : n + "ms";
+const reasonNote = (t) => t.reasons.length
+  ? t.reasons.slice(0, 3).map((r) => r.reason + " " + r.count).join(" · ")
+  : "none in range";
 const PUSH_TILES = [
   { k: "devices", label: "Devices", fmt: num, note: () => "registered" },
   { k: "registrations", label: "Registrations", fmt: num, note: (t) => t.skips + " skipped (" + pct(t.skip_pct) + ")" },
@@ -198,17 +202,42 @@ const PUSH_TILES = [
   { k: "delivered", label: "Delivered", fmt: num,
     status: (t) => t.pushes > 0 && t.deliver_pct < 90 ? "warn" : "good",
     note: (t) => pct(t.deliver_pct) + " of pushes" },
+  { k: "failed", label: "Failed", fmt: num,
+    status: (t) => t.failed > 0 ? "warn" : "good", note: () => "our side or Apple's" },
+  { k: "success_pct", label: "APNs success", fmt: pct,
+    status: (t) => t.success_pct == null ? "good" : t.success_pct < 90 ? "critical" : t.success_pct < 99 ? "warn" : "good",
+    note: () => "of pushes sent to Apple" },
+  { k: "last_delivery_age_ms", label: "Last delivery", fmt: (n) => n == null ? "none yet" : dur(n),
+    note: () => "since relay restart" },
+  { k: "latency_p50_ms", label: "APNs p50", fmt: fmtMs, note: (t) => t.latency_samples + " samples" },
+  { k: "latency_p95_ms", label: "APNs p95", fmt: fmtMs,
+    status: (t) => t.latency_p95_ms == null ? "good" : t.latency_p95_ms >= 5000 ? "critical" : t.latency_p95_ms >= 2000 ? "warn" : "good",
+    note: () => "in range" },
+  { k: "apns_timeouts", label: "APNs timeouts", fmt: num,
+    status: (t) => t.apns_timeouts > 0 ? "critical" : "good", note: () => "no reply in 10s" },
+  { k: "rejected_total", label: "Rejected by Apple", fmt: num,
+    status: (t) => t.rejected_total > 0 ? "warn" : "good", note: reasonNote },
+  { k: "apns_sessions", label: "APNs sessions", fmt: num,
+    note: (t) => t.apns_sessions ? "oldest " + Math.round(t.apns_session_age_s / 60) + "m" : "none open" },
+  { k: "apns_connects", label: "Reconnects", fmt: num,
+    note: (t) => t.apns_throttled + " throttled · " + t.apns_discarded + " discarded" },
   { k: "bad_secret", label: "Bad secret", fmt: num,
     status: (t) => t.bad_secret > 0 ? "warn" : "good", note: () => "in range" },
   { k: "unknown_token", label: "Unknown token", fmt: num,
     status: (t) => t.unknown_token > 0 ? "warn" : "good", note: () => "in range" },
-  { k: "apns_errors", label: "APNs errors", fmt: num,
-    status: (t) => t.apns_errors > 0 ? "warn" : "good", note: () => "in range" },
 ];
+// A chart with "extras" draws extra lines on the same axes (title + legend carry
+// the meaning); everything else stays single-series.
 const PUSH_CHARTS = [
+  { k: "push_delivered_rate", title: "Push success vs failure /min", color: "--aqua", label: "delivered", fmt: num,
+    extras: [{ k: "push_failed_rate", color: "--red", label: "failed" }] },
+  { k: "apns_latency_p50", title: "APNs latency", color: "--blue", label: "p50", fmt: fmtMs,
+    extras: [{ k: "apns_latency_p95", color: "--orange", label: "p95" }] },
+  { k: "apns_timeouts_rate", title: "APNs timeouts /min", color: "--red", fmt: num },
+  { k: "apns_connects_rate", title: "APNs reconnects /min", color: "--violet", fmt: num },
+  { k: "apns_sessions", title: "Open APNs sessions", color: "--blue", fmt: num },
   { k: "devices", title: "Registered devices", color: "--blue", fmt: num },
-  { k: "push_delivered_rate", title: "Pushes delivered /min", color: "--aqua", fmt: num },
-  { k: "push_bad_secret_rate", title: "Bad-secret pushes /min", color: "--red", fmt: num },
+  { k: "push_bad_secret_rate", title: "Bad-secret pushes /min", color: "--orange", fmt: num },
   { k: "register_written_rate", title: "Register writes /min", color: "--yellow", fmt: num },
   { k: "register_skipped_rate", title: "Register skips /min", color: "--violet", fmt: num },
 ];
@@ -278,20 +307,41 @@ function renderPushSection(push, windowObj) {
 
   fillTiles(tilesEl, PUSH_TILES, push.tiles);
   chartsEl.innerHTML = "";
-  for (const spec of PUSH_CHARTS) chartsEl.appendChild(renderChart(spec, push.series[spec.k] || [], windowObj));
+  for (const spec of PUSH_CHARTS) {
+    const extras = (spec.extras || []).map((e) => ({ points: push.series[e.k] || [], color: e.color, label: e.label }));
+    chartsEl.appendChild(renderChart(spec, push.series[spec.k] || [], windowObj, extras));
+  }
 }
 
 // Build one small-multiple line chart as inline SVG with a crosshair + tooltip.
-function renderChart(spec, points, windowObj) {
+// With "extras" it draws additional lines on the same axes (all sharing the same
+// time centers), with a legend in the subtitle and every value in the tooltip.
+function renderChart(spec, points, windowObj, extras) {
+  const lines = [{ points, color: cssVar(spec.color), label: spec.label }]
+    .concat((extras || []).map((e) => ({ points: e.points, color: cssVar(e.color), label: e.label })));
+  const multi = lines.length > 1;
+
   const wrap = document.createElement("div");
   wrap.className = "chart";
   const h = document.createElement("h3"); h.textContent = spec.title; wrap.appendChild(h);
   const cur = document.createElement("div"); cur.className = "cur";
-  const last = [...points].reverse().find(p => p.v != null);
-  cur.textContent = last ? spec.fmt(last.v) : "no data";
+  const lastOf = (pts) => [...pts].reverse().find(p => p.v != null);
+  if (multi) {
+    for (const ln of lines) {
+      const last = lastOf(ln.points);
+      const dotEl = document.createElement("span");
+      dotEl.textContent = "\u25CF ";
+      dotEl.style.color = ln.color;
+      cur.appendChild(dotEl);
+      cur.appendChild(document.createTextNode(ln.label + " " + (last ? spec.fmt(last.v) : "—") + "   "));
+    }
+  } else {
+    const last = lastOf(points);
+    cur.textContent = last ? spec.fmt(last.v) : "no data";
+  }
   wrap.appendChild(cur);
 
-  const real = points.filter(p => p.v != null);
+  const real = lines.flatMap((ln) => ln.points.filter(p => p.v != null));
   if (!real.length) {
     const e = document.createElement("div"); e.className = "empty"; e.textContent = "No data in range";
     wrap.appendChild(e); return wrap;
@@ -303,7 +353,6 @@ function renderChart(spec, points, windowObj) {
   if (spec.pctAxis) vmax = 1; else vmax = vmax <= 0 ? 1 : vmax * 1.15;
   const x = (t) => PADX + (t - t0) / Math.max(1, t1 - t0) * (W - 2*PADX);
   const y = (v) => PADT + (1 - v / vmax) * (H - PADT - PADB);
-  const color = cssVar(spec.color);
 
   const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
   svg.setAttribute("viewBox", "0 0 " + W + " " + H);
@@ -321,41 +370,60 @@ function renderChart(spec, points, windowObj) {
     svg.appendChild(lab);
   }
 
-  // Build path, breaking at nulls so gaps show as gaps.
-  let dLine = "", dArea = "", open = false, firstX = null, lastX = null;
-  for (const p of points) {
-    if (p.v == null) { open = false; continue; }
-    const px = x(p.t), py = y(p.v);
-    if (!open) { dLine += "M" + px + " " + py; open = true; if (firstX == null) firstX = px; }
-    else dLine += "L" + px + " " + py;
-    lastX = px;
-  }
-  // Simple area under the whole visible line for subtle fill.
-  const areaPath = mk("path", { d: dLine + (lastX!=null ? ("L" + lastX + " " + y(0) + "L" + (firstX||PADX) + " " + y(0) + "Z") : ""), fill: color, "fill-opacity": 0.10, stroke: "none" });
-  svg.appendChild(areaPath);
-  svg.appendChild(mk("path", { d: dLine, fill: "none", stroke: color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", "vector-effect": "non-scaling-stroke" }));
+  // One path per line, broken at nulls so gaps show as gaps. Only the first
+  // (primary) line gets the subtle area fill, so a pair stays legible.
+  lines.forEach((ln, li) => {
+    let dLine = "", open = false, firstX = null, lastX = null;
+    for (const p of ln.points) {
+      if (p.v == null) { open = false; continue; }
+      const px = x(p.t), py = y(p.v);
+      if (!open) { dLine += "M" + px + " " + py; open = true; if (firstX == null) firstX = px; }
+      else dLine += "L" + px + " " + py;
+      lastX = px;
+    }
+    if (li === 0) {
+      svg.appendChild(mk("path", { d: dLine + (lastX!=null ? ("L" + lastX + " " + y(0) + "L" + (firstX||PADX) + " " + y(0) + "Z") : ""), fill: ln.color, "fill-opacity": 0.10, stroke: "none" }));
+    }
+    svg.appendChild(mk("path", { d: dLine, fill: "none", stroke: ln.color, "stroke-width": 2, "stroke-linejoin": "round", "stroke-linecap": "round", "vector-effect": "non-scaling-stroke" }));
+  });
 
-  // Hover layer: crosshair + dot + tooltip.
+  // Hover layer: crosshair + one dot per line + tooltip listing every value.
   const cross = mk("line", { x1: 0, x2: 0, y1: PADT, y2: H-PADB, stroke: cssVar("--axis"), "stroke-width": 1, opacity: 0, "vector-effect": "non-scaling-stroke" });
-  const dot = mk("circle", { r: 3.5, fill: color, stroke: cssVar("--surface"), "stroke-width": 2, opacity: 0 });
-  svg.appendChild(cross); svg.appendChild(dot);
+  svg.appendChild(cross);
+  const dots = lines.map((ln) => {
+    const d = mk("circle", { r: 3.5, fill: ln.color, stroke: cssVar("--surface"), "stroke-width": 2, opacity: 0 });
+    svg.appendChild(d);
+    return d;
+  });
   const tt = document.getElementById("tt");
 
   function onMove(ev) {
     const rect = svg.getBoundingClientRect();
     const relX = (ev.clientX - rect.left) / rect.width;
     const tt0 = t0 + relX * (t1 - t0);
-    let best = null;
-    for (const p of real) if (best == null || Math.abs(p.t - tt0) < Math.abs(best.t - tt0)) best = p;
-    if (!best) return;
-    cross.setAttribute("x1", x(best.t)); cross.setAttribute("x2", x(best.t)); cross.setAttribute("opacity", 1);
-    dot.setAttribute("cx", x(best.t)); dot.setAttribute("cy", y(best.v)); dot.setAttribute("opacity", 1);
-    tt.innerHTML = '<div class="t">' + new Date(best.t).toLocaleString() + '</div><div class="v">' + spec.fmt(best.v) + '</div>';
+    // Nearest slot (all lines share time centers) that has data on any line.
+    let bi = -1;
+    points.forEach((p, i) => {
+      if (!lines.some((ln) => ln.points[i] && ln.points[i].v != null)) return;
+      if (bi < 0 || Math.abs(p.t - tt0) < Math.abs(points[bi].t - tt0)) bi = i;
+    });
+    if (bi < 0) return;
+    const bt = points[bi].t;
+    cross.setAttribute("x1", x(bt)); cross.setAttribute("x2", x(bt)); cross.setAttribute("opacity", 1);
+    let rows = "";
+    lines.forEach((ln, li) => {
+      const p = ln.points[bi];
+      if (p && p.v != null) {
+        dots[li].setAttribute("cx", x(bt)); dots[li].setAttribute("cy", y(p.v)); dots[li].setAttribute("opacity", 1);
+        rows += '<div class="v">' + (multi ? ln.label + " " : "") + spec.fmt(p.v) + '</div>';
+      } else dots[li].setAttribute("opacity", 0);
+    });
+    tt.innerHTML = '<div class="t">' + new Date(bt).toLocaleString() + '</div>' + rows;
     tt.style.opacity = 1;
     tt.style.left = Math.min(window.innerWidth - 160, ev.clientX + 12) + "px";
     tt.style.top = (ev.clientY + 12) + "px";
   }
-  function onLeave() { cross.setAttribute("opacity", 0); dot.setAttribute("opacity", 0); tt.style.opacity = 0; }
+  function onLeave() { cross.setAttribute("opacity", 0); dots.forEach((d) => d.setAttribute("opacity", 0)); tt.style.opacity = 0; }
   svg.addEventListener("pointermove", onMove);
   svg.addEventListener("pointerleave", onLeave);
 
@@ -374,15 +442,24 @@ async function load() {
     const res = await fetch("api/data?range=" + encodeURIComponent(curRange), { headers: { accept: "application/json" } });
     if (!res.ok) throw new Error("HTTP " + res.status);
     const data = await res.json();
-    renderHealth(data.alerts || []);
-    renderTiles(data.tiles);
-    renderCharts(data.series, data.window);
+    // A push-relay-only host has no relay to show (relay_enabled === false): hide
+    // that half and take the page title and freshness from the push relay.
+    const relayOn = data.relay_enabled !== false;
+    for (const id of ["health", "tiles", "charts"]) document.getElementById(id).hidden = !relayOn;
+    document.querySelector("h1").textContent = relayOn ? "iTerm2 Relay" : "iTerm2 Push Relay";
+    document.title = relayOn ? "iTerm2 Relay Dashboard" : "iTerm2 Push Relay Dashboard";
+    if (relayOn) {
+      renderHealth(data.alerts || []);
+      renderTiles(data.tiles);
+      renderCharts(data.series, data.window);
+    }
     renderPushSection(data.push, data.window);
+    const ft = relayOn ? data.tiles : (data.push && data.push.tiles) || { last_sample_ts: null, stale_ms: null };
     const fresh = document.getElementById("freshness");
-    fresh.textContent = data.tiles.last_sample_ts
-      ? "updated " + dur(data.tiles.stale_ms)
+    fresh.textContent = ft.last_sample_ts
+      ? "updated " + dur(ft.stale_ms)
       : "no samples yet";
-    fresh.style.color = (data.tiles.stale_ms != null && data.tiles.stale_ms > 180000) ? "var(--critical)" : "var(--muted)";
+    fresh.style.color = (ft.stale_ms != null && ft.stale_ms > 180000) ? "var(--critical)" : "var(--muted)";
     document.getElementById("foot").textContent =
       "Reset-aware rates from " + (data.window.buckets) + " buckets. Loopback scrape of /metrics; zero PII. Auto-refreshes every 30s.";
   } catch (e) {

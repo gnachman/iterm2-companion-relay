@@ -139,9 +139,52 @@ const PUSH_PLAIN = {
   pushrelay_push_apns_error_total: "push_apns_error",
   pushrelay_rate_limited_total: "rate_limited",
   pushrelay_devices: "devices",
+  // Delivery outcome + APNs connection health.
+  pushrelay_push_failed_total: "push_failed",
+  pushrelay_apns_connects_total: "apns_connects",
+  pushrelay_apns_connect_throttled_total: "apns_throttled",
+  pushrelay_apns_session_errors_total: "apns_session_errors",
+  pushrelay_apns_discarded_idle_total: "apns_discard_idle",
+  pushrelay_apns_discarded_timeout_total: "apns_discard_timeout",
+  pushrelay_apns_request_timeouts_total: "apns_timeouts",
+  pushrelay_apns_sessions: "apns_sessions",                       // gauge
+  pushrelay_apns_oldest_session_age_seconds: "apns_oldest_session_s", // gauge
+  pushrelay_last_delivery_timestamp_seconds: "last_delivery_ts",  // gauge (unix s; 0 = none yet)
+  pushrelay_apns_latency_seconds_sum: "lat_sum",
+  pushrelay_apns_latency_seconds_count: "lat_count",
 };
 
-export const PUSH_FIELDS = Object.values(PUSH_PLAIN);
+// APNs latency histogram: bounds (seconds, as the push relay emits them) -> the
+// stored column. Milliseconds in the name keep the column identifiers plain.
+const LAT_BUCKETS = [
+  ["0.05", "lat_le50"], ["0.1", "lat_le100"], ["0.25", "lat_le250"], ["0.5", "lat_le500"],
+  ["1", "lat_le1000"], ["2.5", "lat_le2500"], ["5", "lat_le5000"], ["10", "lat_le10000"],
+];
+// Upper bounds in ms, in column order, for quantile estimation (series.js).
+export const LAT_BOUNDS_MS = [50, 100, 250, 500, 1000, 2500, 5000, 10000];
+export const LAT_COLUMNS = LAT_BUCKETS.map(([, col]) => col);
+
+// Apple's rejection reasons that matter operationally get their own column; the
+// rest fold into rej_other. The push relay already bounds the label set.
+const REJECT_COLUMNS = {
+  BadDeviceToken: "rej_bad_token",
+  Unregistered: "rej_unregistered",
+  DeviceTokenNotForTopic: "rej_wrong_topic",
+  TooManyRequests: "rej_too_many",
+  ExpiredProviderToken: "rej_expired_jwt",
+  InvalidProviderToken: "rej_invalid_jwt",
+  InternalServerError: "rej_apple_500",
+  ServiceUnavailable: "rej_unavailable",
+};
+export const REJECT_FIELDS = [...Object.values(REJECT_COLUMNS), "rej_other"];
+// Human labels for the tile note, keyed by column.
+export const REJECT_LABELS = {
+  rej_bad_token: "BadDeviceToken", rej_unregistered: "Unregistered", rej_wrong_topic: "DeviceTokenNotForTopic",
+  rej_too_many: "TooManyRequests", rej_expired_jwt: "ExpiredProviderToken", rej_invalid_jwt: "InvalidProviderToken",
+  rej_apple_500: "InternalServerError", rej_unavailable: "ServiceUnavailable", rej_other: "other",
+};
+
+export const PUSH_FIELDS = [...Object.values(PUSH_PLAIN), ...LAT_COLUMNS, ...REJECT_FIELDS];
 
 export function parsePushMetrics(text) {
   const out = {};
@@ -150,7 +193,17 @@ export function parsePushMetrics(text) {
     const p = parseLine(raw);
     if (!p || !Number.isFinite(p.value)) continue;
     const flat = PUSH_PLAIN[p.name];
-    if (flat) out[flat] = p.value;
+    if (flat) { out[flat] = p.value; continue; }
+    if (p.name === "pushrelay_apns_latency_seconds_bucket") {
+      const le = label(p.labels, "le");
+      const hit = LAT_BUCKETS.find(([bound]) => bound === le);
+      if (hit) out[hit[1]] = p.value;     // +Inf == lat_count, not stored twice
+      continue;
+    }
+    if (p.name === "pushrelay_apns_rejected_total") {
+      // Several labels can fold into rej_other, so accumulate rather than assign.
+      out[REJECT_COLUMNS[label(p.labels, "reason")] || "rej_other"] += p.value;
+    }
   }
   return out;
 }

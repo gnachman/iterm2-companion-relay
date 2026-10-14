@@ -15,6 +15,7 @@
 // not negative traffic — it contributes 0 and starts a fresh interval).
 
 import { capAlerts, errorAlert, exceptionAlert } from "../monitor/src/monitor.js";
+import { LAT_BOUNDS_MS, LAT_COLUMNS, REJECT_FIELDS, REJECT_LABELS } from "./parse.js";
 
 // Reset-aware delta of one cumulative column between two rows.
 function step(prev, cur, field) {
@@ -177,21 +178,54 @@ export function buildDashboard(rows, {
 
 // --- Push relay -------------------------------------------------------------
 // Same reset-aware treatment as the relay (counters reset to ~0 on restart), for
-// the push_samples rows. `devices` is a gauge; everything else is a cumulative
-// counter charted as a per-minute rate and summed over the window for a tile.
+// the push_samples rows. Gauges (devices, apns_sessions, session age) are
+// averaged per slot; everything else is a cumulative counter charted as a
+// per-minute rate and summed over the window for a tile.
 const PUSH_RATE_FIELDS = [
   "register", "register_written", "register_skipped", "register_rejected",
-  "push", "push_delivered", "push_bad_secret", "push_unknown_token",
+  "push", "push_delivered", "push_failed", "push_bad_secret", "push_unknown_token",
   "push_apns_error", "rate_limited",
+  "apns_connects", "apns_throttled", "apns_session_errors", "apns_discard_idle",
+  "apns_discard_timeout", "apns_timeouts", "lat_count",
+  ...LAT_COLUMNS, ...REJECT_FIELDS,
 ];
+const PUSH_GAUGES = ["devices", "apns_sessions", "apns_oldest_session_s"];
+
+// Estimate a latency quantile (ms) from per-bound CUMULATIVE counts, interpolating
+// linearly inside the bucket like Prometheus' histogram_quantile. Observations
+// above the last bound can only be reported as that bound (the true value is at
+// least that), which is the conservative reading. null when nothing was observed.
+function latencyQuantile(q, cum, total) {
+  if (!(total > 0)) return null;
+  const rank = q * total;
+  let prevCount = 0, prevBound = 0;
+  for (let i = 0; i < LAT_BOUNDS_MS.length; i++) {
+    if (cum[i] >= rank) {
+      const inBucket = cum[i] - prevCount;
+      if (inBucket <= 0) return LAT_BOUNDS_MS[i];
+      return Math.round(prevBound + (LAT_BOUNDS_MS[i] - prevBound) * ((rank - prevCount) / inBucket));
+    }
+    prevCount = cum[i];
+    prevBound = LAT_BOUNDS_MS[i];
+  }
+  return LAT_BOUNDS_MS[LAT_BOUNDS_MS.length - 1];
+}
 
 function bucketizePush(rows, fromMs, toMs, buckets) {
   const span = Math.max(1, toMs - fromMs);
   const width = span / buckets;
   const idx = (ts) => Math.min(buckets - 1, Math.max(0, Math.floor((ts - fromMs) / width)));
 
-  const gaugeAcc = Array.from({ length: buckets }, () => ({ devices: 0, n: 0 }));
-  for (const r of rows) { const b = gaugeAcc[idx(r.ts)]; b.devices += r.devices; b.n += 1; }
+  const gaugeAcc = Array.from({ length: buckets }, () => {
+    const o = { n: 0 };
+    for (const g of PUSH_GAUGES) o[g] = 0;
+    return o;
+  });
+  for (const r of rows) {
+    const b = gaugeAcc[idx(r.ts)];
+    for (const g of PUSH_GAUGES) b[g] += r[g];
+    b.n += 1;
+  }
 
   const rateAcc = Array.from({ length: buckets }, () => {
     const o = { elapsedMs: 0 };
@@ -206,30 +240,56 @@ function bucketizePush(rows, fromMs, toMs, buckets) {
   }
 
   const centers = Array.from({ length: buckets }, (_, i) => Math.round(fromMs + width * (i + 0.5)));
-  const gauge = centers.map((t, i) => { const b = gaugeAcc[i]; return { t, v: b.n ? +(b.devices / b.n).toFixed(2) : null }; });
+  const gauge = (field) => centers.map((t, i) => { const b = gaugeAcc[i]; return { t, v: b.n ? +(b[field] / b.n).toFixed(2) : null }; });
   const rate = (field) => centers.map((t, i) => {
     const a = rateAcc[i];
     return { t, v: a.elapsedMs > 0 ? +((a[field] / a.elapsedMs) * 60000).toFixed(3) : null };
   });
+  const quantile = (q) => centers.map((t, i) => {
+    const a = rateAcc[i];
+    return { t, v: latencyQuantile(q, LAT_COLUMNS.map((c) => a[c]), a.lat_count) };
+  });
 
   return {
-    devices: gauge,
+    devices: gauge("devices"),
     register_written_rate: rate("register_written"),
     register_skipped_rate: rate("register_skipped"),
     push_delivered_rate: rate("push_delivered"),
+    push_failed_rate: rate("push_failed"),
     push_bad_secret_rate: rate("push_bad_secret"),
+    apns_connects_rate: rate("apns_connects"),
+    apns_timeouts_rate: rate("apns_timeouts"),
+    apns_sessions: gauge("apns_sessions"),
+    apns_latency_p50: quantile(0.5),
+    apns_latency_p95: quantile(0.95),
   };
 }
 
 // Build the push-relay payload for a window. Same args as buildDashboard; returns
-// { tiles, series } (no separate alerts panel — bad-secret/APNs-error tiles carry
-// the status). `latest` is the newest push sample overall.
+// { tiles, series } (no separate alerts panel — failure/timeout tiles carry the
+// status). `latest` is the newest push sample overall.
 export function buildPush(rows, { latest = null, fromMs, toMs, buckets = 240, nowMs } = {}) {
   const cur = latest || (rows.length ? rows[rows.length - 1] : null);
   const registrations = windowTotal(rows, "register");
   const skips = windowTotal(rows, "register_skipped");
   const pushes = windowTotal(rows, "push");
   const delivered = windowTotal(rows, "push_delivered");
+  const failed = windowTotal(rows, "push_failed");
+  const attempts = delivered + failed;   // pushes that actually reached an outcome at APNs
+
+  // Window-wide latency quantiles from the summed per-bound deltas.
+  const latCum = LAT_COLUMNS.map((c) => windowTotal(rows, c));
+  const latCount = windowTotal(rows, "lat_count");
+
+  // Apple's rejections by reason, nonzero only, biggest first.
+  const reasons = REJECT_FIELDS
+    .map((f) => ({ reason: REJECT_LABELS[f], count: windowTotal(rows, f) }))
+    .filter((r) => r.count > 0)
+    .sort((a, b) => b.count - a.count);
+
+  // Age of the last delivery as of the newest sample. The relay reports 0 until
+  // it delivers something after (re)start, so that reads as "none yet" (null).
+  const lastDeliveryMs = cur && cur.last_delivery_ts > 0 ? cur.last_delivery_ts * 1000 : null;
 
   const tiles = {
     devices: cur ? cur.devices : 0,
@@ -240,10 +300,27 @@ export function buildPush(rows, { latest = null, fromMs, toMs, buckets = 240, no
     pushes,
     delivered,
     deliver_pct: pushes > 0 ? +((delivered / pushes) * 100).toFixed(1) : 0,
+    failed,
+    // Of pushes that were attempted against Apple, how many succeeded. Client
+    // faults (bad secret, unknown token) are excluded: they never reach APNs.
+    success_pct: attempts > 0 ? +((delivered / attempts) * 100).toFixed(1) : null,
     bad_secret: windowTotal(rows, "push_bad_secret"),
     unknown_token: windowTotal(rows, "push_unknown_token"),
     apns_errors: windowTotal(rows, "push_apns_error"),
     rate_limited: windowTotal(rows, "rate_limited"),
+    reasons,
+    rejected_total: reasons.reduce((n, r) => n + r.count, 0),
+    latency_p50_ms: latencyQuantile(0.5, latCum, latCount),
+    latency_p95_ms: latencyQuantile(0.95, latCum, latCount),
+    latency_samples: latCount,
+    apns_sessions: cur ? cur.apns_sessions : 0,
+    apns_session_age_s: cur ? cur.apns_oldest_session_s : 0,
+    apns_connects: windowTotal(rows, "apns_connects"),
+    apns_throttled: windowTotal(rows, "apns_throttled"),
+    apns_timeouts: windowTotal(rows, "apns_timeouts"),
+    apns_session_errors: windowTotal(rows, "apns_session_errors"),
+    apns_discarded: windowTotal(rows, "apns_discard_idle") + windowTotal(rows, "apns_discard_timeout"),
+    last_delivery_age_ms: lastDeliveryMs != null && cur ? Math.max(0, cur.ts - lastDeliveryMs) : null,
     last_sample_ts: latest ? latest.ts : (rows.length ? rows[rows.length - 1].ts : null),
     stale_ms: latest && nowMs ? nowMs - latest.ts : null,
   };

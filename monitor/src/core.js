@@ -22,7 +22,7 @@
 
 import {
   parseConfig, normalizeSnapshot, deltas, rollHour, hourKey, analyze, dueAlerts,
-  livenessAlert, probeAlert,
+  livenessAlert, probeAlert, parsePushMetrics, pushDeltas, pushAlerts,
 } from "./monitor.js";
 
 // Direct-mode (no shard map) push lands under this single key; fleet-mode pushes
@@ -62,7 +62,7 @@ function ownedBucketCount(map, host) {
 // env: the flat config/secrets object (process.env in prod). now: ms timestamp.
 // deps: { dry, kv, sendEmail, fetchMap, probeOne, roomForHost }. Returns the health
 // doc (also persisted when !dry).
-export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, roomForHost }) {
+export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, roomForHost, scrapePush, probePush }) {
   const cfg = parseConfig(env);
   const state = dry ? {} : ((await kv.get(STATE_KEY, "json")) || {});
   const fleet = !!env.SHARD_MAP_URL;
@@ -174,6 +174,70 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
     });
   }
 
+  // --- push relay (APNs forwarder on this box) ---
+  // Optional: enabled by PUSH_METRICS_URL. It is scraped, not pushed (it shares
+  // our host), and shows up as one more card in the fleet summary. Failure to
+  // scrape is the push relay's liveness signal; PUSH_PROBE_URL adds an outside-in
+  // check through DNS/edge/proxy. Both are debounced like the relay checks.
+  let nextPush = null;
+  if (env.PUSH_METRICS_URL && scrapePush) {
+    const label = env.PUSH_HOST_LABEL || "push";
+    const ps = state.push || {};
+    const reasons = [];
+    let cur = null;
+    let scrapeErr = null;
+    try { cur = parsePushMetrics(await scrapePush(env.PUSH_METRICS_URL)); }
+    catch (e) { scrapeErr = String((e && e.message) || e); }
+
+    const scrapeFailStreak = cur ? 0 : (ps.scrapeFailStreak || 0) + 1;
+    if (!cur) {
+      const a = livenessAlert(`push relay /metrics unreachable: ${scrapeErr}`);
+      a.title = "Push relay not reporting";
+      a.body = `The push relay's metrics endpoint could not be read (${scrapeErr}). The process or its host may be down, so pushes are failing.`;
+      reasons.push("liveness");
+      if (scrapeFailStreak >= cfg.alertFailStreak) alerts.push(hostAlert(label, true, a));
+    }
+
+    let probe = null;
+    if (env.PUSH_PROBE_URL && probePush) probe = await probePush(env.PUSH_PROBE_URL, cfg.probeTimeoutMs);
+    const probeFailStreak = !probe || probe.ok ? 0 : (ps.probeFailStreak || 0) + 1;
+    if (probe && !probe.ok) {
+      reasons.push("probe");
+      if (probeFailStreak >= cfg.alertFailStreak) alerts.push(hostAlert(label, true, probeAlert(probe.detail)));
+    }
+
+    // The interval needs two good scrapes in a row; a gap or a restart (counters
+    // went backwards) just skips the rate checks for one tick.
+    const interval = cur ? pushDeltas(ps.prev, cur.counters) : null;
+    for (const a of pushAlerts(interval, cfg)) { reasons.push(a.key); alerts.push(hostAlert(label, true, a)); }
+
+    const crit = !cur || (probe ? !probe.ok : false) || reasons.some((k) => k === "apns_auth")
+      || pushAlerts(interval, cfg).some((a) => a.severity === "critical");
+    const warn = !crit && reasons.some((k) => k !== "liveness" && k !== "probe");
+    const lastDeliveryAgeMs = cur && cur.gauges.lastDeliveryTs > 0 ? Math.max(0, now - cur.gauges.lastDeliveryTs * 1000) : null;
+    summaries.push({
+      host: label,
+      kind: "push",
+      status: crit ? "crit" : (warn ? "warn" : "ok"),
+      checkedAt: now,
+      ageMs: cur ? 0 : null,
+      probeOk: probe ? probe.ok : null,
+      reasons,
+      detailUrl: env.PUSH_DASHBOARD_URL || null,
+      push: cur ? {
+        devices: cur.gauges.devices,
+        sessions: cur.gauges.sessions,
+        lastDeliveryAgeMs,
+        delivered: interval ? interval.delivered : null,
+        failed: interval ? interval.failed : null,
+        timeouts: interval ? interval.timeouts : null,
+      } : null,
+    });
+    // Keep the previous good counters across a failed scrape so the next success
+    // still has a baseline (a restart is then caught by the backwards counter).
+    nextPush = { prev: cur ? cur.counters : ps.prev, scrapeFailStreak, probeFailStreak };
+  }
+
   const { due, sentAt } = dueAlerts(alerts, state.sentAt || {}, now, cfg.cooldownMs);
 
   const counts = summaries.reduce((c, s) => { c[s.status] += 1; return c; }, { ok: 0, warn: 0, crit: 0 });
@@ -189,6 +253,7 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
 
   const nextState = { hosts: nextHosts };
   if (fleet) nextState.mapFailStreak = mapFailStreak; // debounce state for the shard-map fetch
+  if (nextPush) nextState.push = nextPush;
   if (!dry) {
     let delivered = true;
     if (due.length) {

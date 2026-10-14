@@ -324,6 +324,10 @@ export function parseConfig(env = {}) {
     // so a blanked/0 value can't restore fire-on-first-failure. Set to 1 to keep
     // the old immediate behavior.
     alertFailStreak: Math.max(1, n(env.ALERT_FAIL_STREAK, 2)),
+    // Push relay (APNs forwarder) thresholds, over one analysis interval.
+    pushTimeoutCrit: n(env.PUSH_TIMEOUT_CRIT, 3),       // APNs timeouts => critical
+    pushFailMinAttempts: n(env.PUSH_FAIL_MIN_ATTEMPTS, 5),
+    pushFailRatio: n(env.PUSH_FAIL_RATIO, 0.8),          // failed/(delivered+failed) => warn
   };
 }
 
@@ -404,4 +408,104 @@ export function dueAlerts(alerts, prev, now, cooldownMs) {
     sentAt[`${a.key}:sev`] = a.severity;
   }
   return { due, sentAt };
+}
+
+// --- push relay (the APNs forwarder) ---
+// Unlike the relays, the push relay does not push to us: it is on the monitor's
+// own box, so each tick scrapes its loopback /metrics (Prometheus text) and
+// compares to the previous tick. These are pure: text/counters in, alerts out.
+
+// Rejections that mean our APNs signing identity itself is wrong or expired, so
+// EVERY push fails until someone fixes the key. (A BadDeviceToken/Unregistered
+// is just a stale device and is normal, so it is deliberately not here.)
+const PUSH_AUTH_REASONS = new Set([
+  "ExpiredProviderToken", "InvalidProviderToken", "MissingProviderToken", "BadEnvironmentKeyInToken",
+]);
+
+// Parse the `pushrelay_*` exposition into the few cumulative counters and gauges
+// the checks use. Tolerant: unknown lines ignored, missing series read as 0.
+export function parsePushMetrics(text) {
+  const counters = { pushes: 0, delivered: 0, failed: 0, timeouts: 0, authRejects: 0 };
+  const gauges = { sessions: 0, devices: 0, lastDeliveryTs: 0 };
+  const plain = {
+    pushrelay_push_total: ["c", "pushes"],
+    pushrelay_push_delivered_total: ["c", "delivered"],
+    pushrelay_push_failed_total: ["c", "failed"],
+    pushrelay_apns_request_timeouts_total: ["c", "timeouts"],
+    pushrelay_apns_sessions: ["g", "sessions"],
+    pushrelay_devices: ["g", "devices"],
+    pushrelay_last_delivery_timestamp_seconds: ["g", "lastDeliveryTs"],
+  };
+  for (const raw of String(text).split("\n")) {
+    const line = raw.trim();
+    if (!line || line[0] === "#") continue;
+    const m = /^([a-zA-Z_:][a-zA-Z0-9_:]*)(\{[^}]*\})?\s+(\S+)$/.exec(line);
+    if (!m) continue;
+    const value = Number(m[3]);
+    if (!Number.isFinite(value)) continue;
+    const hit = plain[m[1]];
+    if (hit && !m[2]) { (hit[0] === "c" ? counters : gauges)[hit[1]] = value; continue; }
+    if (m[1] === "pushrelay_apns_rejected_total") {
+      const reason = /reason="([^"]*)"/.exec(m[2] || "");
+      if (reason && PUSH_AUTH_REASONS.has(reason[1])) counters.authRejects += value;
+    }
+  }
+  return { counters, gauges };
+}
+
+// Reset-aware interval between two counter snapshots. A counter that went
+// backwards means the push relay restarted, so that interval is unknowable
+// (null) rather than negative or a spike.
+export function pushDeltas(prev, cur) {
+  if (!prev) return null;
+  const out = {};
+  for (const k of Object.keys(cur)) {
+    const d = cur[k] - (prev[k] || 0);
+    if (d < 0) return null;
+    out[k] = d;
+  }
+  return out;
+}
+
+// Alerts for one interval of push-relay activity. `interval` is pushDeltas().
+//  - APNs timeouts: Apple not answering (the dead-connection failure mode). One
+//    is a warning; several, or any with nothing delivered, is critical.
+//  - Auth rejections: the signing key is bad/expired/wrong environment: every
+//    push fails until fixed, so critical.
+//  - Everything failing: a high failure ratio over enough attempts, whatever the
+//    reason. Ratio is over pushes that reached an outcome at Apple; client faults
+//    never count, and the ratio threshold is high because a few stale device
+//    tokens (Unregistered) are routine.
+export function pushAlerts(interval, cfg) {
+  const alerts = [];
+  if (!interval) return alerts;
+  if (interval.timeouts >= 1) {
+    const crit = interval.timeouts >= cfg.pushTimeoutCrit || interval.delivered === 0;
+    alerts.push({
+      key: "apns_timeouts",
+      severity: crit ? "critical" : "warn",
+      title: `APNs timeouts: ${interval.timeouts}`,
+      body: `${interval.timeouts} push request(s) got no answer from Apple since the last check ` +
+        `(${interval.delivered} delivered). The connection to APNs may be stuck.`,
+    });
+  }
+  if (interval.authRejects >= 1) {
+    alerts.push({
+      key: "apns_auth",
+      severity: "critical",
+      title: "APNs rejecting our signing key",
+      body: `Apple rejected ${interval.authRejects} push(es) as a provider-token/key problem since the ` +
+        `last check. Every push fails until the key (or its environment scope) is fixed.`,
+    });
+  }
+  const attempts = interval.delivered + interval.failed;
+  if (attempts >= cfg.pushFailMinAttempts && interval.failed / attempts >= cfg.pushFailRatio) {
+    alerts.push({
+      key: "push_failures",
+      severity: "warn",
+      title: `Push delivery failing (${interval.failed}/${attempts})`,
+      body: `${interval.failed} of ${attempts} pushes that reached APNs handling failed since the last check.`,
+    });
+  }
+  return alerts;
 }

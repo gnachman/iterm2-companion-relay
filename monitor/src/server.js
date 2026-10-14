@@ -214,6 +214,29 @@ function readBody(req, limitBytes = 64 * 1024) {
   });
 }
 
+// GET a URL and return its body text; throws on a non-2xx or timeout. Used to
+// read the push relay's loopback /metrics.
+export async function fetchText(url, timeoutMs = 10_000) {
+  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+  if (!res.ok) throw new Error(`HTTP ${res.status}`);
+  return res.text();
+}
+
+// Outside-in check of the push relay's public path (DNS -> edge -> proxy ->
+// process). A GET is answered 405 "POST only" by the worker without touching APNs,
+// a device token, or the relay's push counters, so it can run every tick for free.
+// Anything else (a CDN error page, a 502, a different app) means inbound is broken.
+export async function probePushOrigin(url, timeoutMs = 10_000) {
+  try {
+    const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+    return res.status === 405
+      ? { ok: true, detail: "ok" }
+      : { ok: false, detail: `unexpected HTTP ${res.status} from ${url} (expected 405)` };
+  } catch (e) {
+    return { ok: false, detail: String((e && e.message) || e) };
+  }
+}
+
 // --- fleet dashboard (server-rendered from the persisted HEALTH doc) ---
 
 const N_BUCKETS = 65536; // ring size; buckets -> % of fleet weight
@@ -253,17 +276,28 @@ function row(k, v) {
 // own detailed dashboard (e.g. "https://{host}/dashboard/"). When set and the host
 // is a real hostname, the whole card becomes a link to that shard's detail view.
 function cardHtml(h, detailTpl) {
-  const rows = [row("seen", h.ageMs == null ? "never" : `${ago(h.ageMs)} ago`)];
+  const isPush = h.kind === "push";
+  // A relay reports on a push cadence ("seen Ns ago"); the push relay is scraped
+  // each analysis tick, so its freshness is when we last checked it.
+  const rows = [row(isPush ? "checked" : "seen", h.ageMs == null ? "never" : `${ago(h.ageMs)} ago`)];
   if (h.sockets != null) rows.push(row("sockets", h.sockets));
   if (h.rooms != null) rows.push(row("rooms", h.rooms));
   if (h.buckets != null) rows.push(row("buckets", `${h.buckets} (${(h.buckets / N_BUCKETS * 100).toFixed(1)}%)`));
+  if (isPush && h.push) {
+    rows.push(row("last delivery", h.push.lastDeliveryAgeMs == null ? "none yet" : `${ago(h.push.lastDeliveryAgeMs)} ago`));
+    if (h.push.delivered != null) rows.push(row("last check", `${h.push.delivered} ok / ${h.push.failed} failed`));
+    if (h.push.timeouts) rows.push(row("APNs timeouts", h.push.timeouts));
+    rows.push(row("APNs sessions", h.push.sessions));
+    rows.push(row("devices", h.push.devices));
+  }
   rows.push(row("inbound", h.probeOk == null ? "-" : (h.probeOk ? "ok" : "FAILING")));
   const why = h.status !== "ok" && h.reasons && h.reasons.length
     ? `<div class=why>${esc(h.reasons.join(", "))}</div>` : "";
   const inner = `<div class=top><span class=host>${esc(h.host)}</span>`
     + `<span class="badge ${esc(h.status)}">${esc(h.status.toUpperCase())}</span></div>`
     + `<div class=rows>${rows.join("")}</div>${why}`;
-  const url = detailTpl && h.host.includes(".") ? detailTpl.replace("{host}", h.host) : null;
+  const url = isPush ? (h.detailUrl || null)
+    : (detailTpl && h.host.includes(".") ? detailTpl.replace("{host}", h.host) : null);
   return url
     ? `<a class="card link ${esc(h.status)}" href="${esc(url)}" target="_blank" rel="noopener">${inner}<div class=open>detail &#8599;</div></a>`
     : `<div class="card ${esc(h.status)}">${inner}</div>`;
@@ -308,6 +342,10 @@ async function liveHealth(env, kv, now) {
   if (!health || !Array.isArray(health.hosts)) return health;
   const cfg = parseConfig(env);
   const hosts = await Promise.all(health.hosts.map(async (h) => {
+    // The push relay is scraped each tick rather than pushing to us, so there is
+    // no per-host snapshot to re-read: keep the tick's verdict, age it from when
+    // it was checked.
+    if (h.kind === "push") return { ...h, ageMs: h.checkedAt != null ? now - h.checkedAt : null };
     const latest = await kv.get(health.fleet ? `latest:${h.host}` : LATEST_KEY, "json");
     const ageMs = latest ? now - latest.receivedAt : null;
     const reporting = !!latest && ageMs <= cfg.staleMs;
@@ -468,6 +506,8 @@ function main() {
     fetchMap,
     probeOne: nodeProbe,
     roomForHost,
+    scrapePush: fetchText,
+    probePush: probePushOrigin,
   };
 
   const tick = () => run(env, Date.now(), { ...deps, dry: false })

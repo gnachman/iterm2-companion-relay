@@ -13,6 +13,9 @@
 // reads the JSON for triage. It also writes state/last.json for edge detection
 // (ok->fail, fail->ok) and as a liveness heartbeat.
 //
+// It also checks the push relay (push.iterm2.com) with a plain GET. A failure
+// there while every relay is fine is verdict "push-unreachable".
+//
 // The handshake mirrors the monitor's probe (monitor/src/{monitor,server}.js);
 // it is kept self-contained here so ops/watch only needs `ws`.
 
@@ -26,6 +29,11 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const MAP_URL = process.env.SHARD_MAP_URL || "https://resolver.iterm2.com/shardmap.json";
 const TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS || 10000);
 const STATE_DIR = process.env.WATCH_STATE_DIR || join(HERE, "state");
+// The push relay (APNs forwarder). Not in the shard map; it answers a plain GET
+// on / with 405, which proves DNS, Cloudflare, and the origin are all serving.
+// Mirrors the monitor's probePushOrigin (monitor/src/server.js). Set to an empty
+// string to skip the push check.
+const PUSH_PROBE_URL = process.env.PUSH_PROBE_URL ?? "https://push.iterm2.com/";
 
 // Control targets prove this box has working internet independent of the relays.
 // Mix providers on purpose: resolver.iterm2.com and cloudflare.com both ride
@@ -65,6 +73,20 @@ async function fetchControl(url) {
     return { url, ok: res.ok, status: res.status, ms: Date.now() - t0 };
   } catch (e) {
     return { url, ok: false, detail: String((e && e.message) || e), ms: Date.now() - t0 };
+  }
+}
+
+// A 405 is the push relay's healthy answer to GET /. Anything else (a 52x from
+// Cloudflare when the origin is down, a timeout, a TLS error) is a failure.
+async function probePush(url) {
+  if (FORCE_FAIL.has(new URL(url).host)) return { ok: false, detail: "timeout after 10000ms" };
+  try {
+    const res = await fetch(url, { cache: "no-store", signal: AbortSignal.timeout(TIMEOUT_MS) });
+    return res.status === 405
+      ? { ok: true, detail: "ok (HTTP 405)" }
+      : { ok: false, detail: `unexpected HTTP ${res.status} (expected 405)` };
+  } catch (e) {
+    return { ok: false, detail: String((e && e.message) || e) };
   }
 }
 
@@ -148,11 +170,17 @@ async function main() {
     hosts.push({ host, ok: r.ok, detail: r.detail, ms: Date.now() - t0 });
   }
 
+  let push = null;
+  if (PUSH_PROBE_URL) {
+    const t0 = Date.now();
+    push = { host: new URL(PUSH_PROBE_URL).host, ...(await probePush(PUSH_PROBE_URL)), ms: Date.now() - t0 };
+  }
+
   const failed = hosts.filter((h) => !h.ok);
   let verdict;
   if (!controlsOk) verdict = "mac-offline";                       // cannot trust probe results
   else if (mapErr && hosts.length === 0) verdict = "map-unreachable";
-  else if (failed.length === 0) verdict = "ok";
+  else if (failed.length === 0) verdict = push && !push.ok ? "push-unreachable" : "ok";
   else if (failed.length === hosts.length) verdict = "all-relays-unreachable";
   else verdict = "some-relays-unreachable";
 
@@ -165,6 +193,7 @@ async function main() {
     mapVersion: (map && map.version) ?? null,
     mapErr,
     hosts,
+    push,
   };
 
   try {

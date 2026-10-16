@@ -69,11 +69,11 @@ while true; do
     if [ "$offline" = 1 ]; then log "fleet readable again from this Mac; resuming normal watch"; offline=0; fi
     if [ "$incident" = 1 ]; then
       log "recovered; poking RESOLVED"
-      poke "RESOLVED: relays reachable again from this Mac. Confirm, post recovery per PLAYBOOK.md, then stand down."
+      poke "RESOLVED: relays and push server reachable again from this Mac. Confirm, post recovery per PLAYBOOK.md, then stand down."
       incident=0
     fi
     fails=0
-    printf '%s  tick ok - all relays reachable from this Mac\n' "$(date '+%H:%M:%S')"
+    printf '%s  tick ok - all relays + push reachable from this Mac\n' "$(date '+%H:%M:%S')"
     sleep "$QUIET_INTERVAL"; continue
   fi
 
@@ -124,7 +124,7 @@ while true; do
       echo '```'
     } > state/incident-brief.md
     log "waking Claude (verdict=${verdict})"
-    if poke "TRIAGE: sustained relay failure (verdict=${verdict}). Read state/incident-brief.md and PLAYBOOK.md, then triage now."; then
+    if poke "TRIAGE: sustained relay/push failure (verdict=${verdict}). Read state/incident-brief.md and PLAYBOOK.md, then triage now."; then
       incident=1
       last_poke="$now"
     else

@@ -43,7 +43,9 @@ Run the independent probe two or three times over ~30s:
 node tick.mjs
 ```
 
-Read the JSON: `verdict`, `controlsOk`, `hosts[].ok` / `.detail`.
+Read the JSON: `verdict`, `controlsOk`, `hosts[].ok` / `.detail`, and `push.ok` /
+`.detail` (the push relay, push.iterm2.com; verdict `push-unreachable` means the
+relays are fine but push is not).
 
 - If `verdict` becomes `ok`: it was a transient blip that already cleared. Go to
   "Transient". Do NOT page.
@@ -62,9 +64,20 @@ Read the JSON: `verdict`, `controlsOk`, `hosts[].ok` / `.detail`.
    - Monitor says ok but you cannot reach it -> the break is on the path between
      THIS Mac and the relay (your ISP / a transit route), not the relay itself.
      Transient-local; do not page, but log it clearly.
+   - For `push-unreachable`, compare against the monitor's push relay card on
+     the same page instead of a relay row. For more detail, read the push
+     dashboard's JSON (relay-dashboard Basic auth from watch.env, not the
+     monitor password; run `set -a; . ./watch.env; set +a` first if unset):
+     `curl -sS -u "$PUSH_DASHBOARD_USER:$PUSH_DASHBOARD_PASSWORD" 'https://mcnachman.cloud/push-dashboard/api/data?range=1h'`
+     Look at `.push.tiles` and `.alerts`: `stale_ms` (large = the dashboard
+     stopped hearing from the push relay), `apns_sessions` (0 = no APNs
+     connection), `apns_timeouts`, `failed` / `success_pct`, `bad_secret`,
+     `reasons`, `last_delivery_age_ms`. Human view: https://mcnachman.cloud/push-dashboard/
 2. Optional public sanity: `curl -sS -m 8 -o /dev/null -w '%{http_code}'
    https://<host>/` (a healthy WS-only endpoint returns 400; a timeout or 502/503
-   corroborates a real inbound break).
+   corroborates a real inbound break). For push: `https://push.iterm2.com/`
+   returns 405 when healthy; it sits behind Cloudflare, so 520-526 means the
+   origin is down while Cloudflare is fine.
 
 REAL if the host is unreachable from this vantage across all retries, controls
 healthy, and the monitor also reports it down (or its public HTTPS is dead too).

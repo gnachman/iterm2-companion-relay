@@ -251,13 +251,20 @@ fi
 # Other sites on this box (e.g. a push relay instance) go in their own files in
 # /etc/caddy/sites.d/, which the generated Caddyfile imports, so rewriting the
 # Caddyfile here never erases them. A glob that matches nothing is fine.
-sudo install -d -m 0755 /etc/caddy/sites.d
+# Extra routes on THIS site (e.g. an authenticated /metrics for a pulling
+# monitor, or a mirror monitor's /fleet) go in /etc/caddy/relay.d/*.caddy, which
+# is imported inside the site block below and likewise survives a redeploy.
+sudo install -d -m 0755 /etc/caddy/sites.d /etc/caddy/relay.d
 echo "==> Writing /etc/caddy/Caddyfile"
 printf '%s\n' "# iTerm2 companion relay (Option A: Caddy-managed TLS). Managed by
 # ops/deploy-vps.sh. Access logging is discarded to preserve the relay's
 # zero-retention posture.
 ${RELAY_ORIGIN_HOST} {
 ${dash_block}
+    # Extra routes for this site, one snippet each (not managed by this script).
+    # A path-matched handle here wins over the catch-all below.
+    import /etc/caddy/relay.d/*.caddy
+
     # WebSocket upgrades + /attest -> the relay. XFF is forced to the real peer
     # so per-IP limits cannot be spoofed; any client CF-Connecting-IP is stripped.
     handle {

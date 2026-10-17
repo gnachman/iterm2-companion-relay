@@ -136,6 +136,15 @@ describe("createServer - operator endpoints", () => {
     expect((await res.json()).emailed).toBe(true);
     expect(sent[0].key).toBe("test");
   });
+
+  it("says a view-only monitor (ALERT_EMAIL=off) sends no test email", async () => {
+    let sent = null;
+    const sendEmail = async (_env, alerts) => { sent = alerts; };
+    const base = await listen(createServer({ ...env, ALERT_EMAIL: "off" }, { kv: fileStore(tmpDir()), sendEmail }));
+    const res = await fetch(`${base}/?test=1`, { headers: { "x-monitor-key": "opkey" } });
+    expect(await res.json()).toMatchObject({ emailed: false });
+    expect(sent).toBe(null);
+  });
 });
 
 describe("nodeProbe (real ws handshake)", () => {

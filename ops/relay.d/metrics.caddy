@@ -1,0 +1,16 @@
+# Copy to /etc/caddy/relay.d/metrics.caddy on a relay box (imported inside the
+# relay's site by the Caddyfile ops/deploy-vps.sh writes), replacing <hash> with
+# the output of `caddy hash-password`. Lets the fleet monitors pull this relay's
+# /metrics (monitor RELAY_PULL_URL_TEMPLATE / RELAY_PULL_BASIC_AUTH).
+#
+# The relay serves /metrics only to a loopback peer with no proxy headers, so
+# strip them here, after the password check.
+handle /metrics {
+	basic_auth {
+		monitor <hash>
+	}
+	reverse_proxy 127.0.0.1:8787 {
+		header_up -X-Forwarded-For
+		header_up -CF-Connecting-IP
+	}
+}

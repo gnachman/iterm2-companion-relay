@@ -1,0 +1,8 @@
+# Copy to /etc/caddy/relay.d/fleet.caddy on a box running a mirror fleet monitor
+# (monitor/ on 127.0.0.1:8791), to serve its dashboard at https://<host>/fleet.
+# The monitor checks the password itself (Basic auth, MANUAL_TRIGGER_SECRET), and
+# only /dashboard is exposed, not its operator endpoints.
+handle /fleet {
+	rewrite * /dashboard
+	reverse_proxy 127.0.0.1:8791
+}

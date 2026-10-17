@@ -38,6 +38,22 @@ monitor config:** put it in the map and point its push at `/ingest/<host>`; the
 monitor discovers it and starts watching. (Without `SHARD_MAP_URL` it degrades to a
 single direct-mode relay that pushes to bare `/ingest`.)
 
+## Mirrors (pull mode)
+
+So `/fleet` survives the primary monitor's box going down, more monitors can run
+on other boxes. A mirror can't rely on pushes (each relay pushes to one URL), so
+it **pulls** instead: with `RELAY_PULL_URL_TEMPLATE=https://{host}/metrics` it
+fetches every map host's `/metrics` once a minute (`RELAY_PULL_MS`) and stores the
+result under the same `latest:<host>` key a push would, so every check works
+unchanged and a scrape that fails shows up as the usual "not reporting". A relay
+serves `/metrics` publicly only behind basic auth (`RELAY_PULL_BASIC_AUTH`), via a
+Caddy snippet in `/etc/caddy/relay.d/` (see `ops/deploy-vps.sh`).
+
+Set `ALERT_EMAIL=off` on a mirror so one outage isn't emailed once per monitor;
+alerts still show on its dashboard. `MONITOR_LABEL` names the monitor in the
+dashboard header. `ops/deploy.sh <ssh-host>` installs or updates the committed
+`monitor/` on a box.
+
 ## Two layers: push (inside-out) + probe (outside-in)
 
 The push tells you the relay **process** is alive and reporting, but not that a

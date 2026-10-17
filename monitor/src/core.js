@@ -22,7 +22,7 @@
 
 import {
   parseConfig, normalizeSnapshot, deltas, rollHour, hourKey, analyze, dueAlerts,
-  livenessAlert, probeAlert, parsePushMetrics, pushDeltas, pushAlerts, peerAlerts, pushRelaysFromEnv,
+  livenessAlert, probeAlert, parsePushMetrics, parseRelayMetrics, pushDeltas, pushAlerts, peerAlerts, pushRelaysFromEnv,
 } from "./monitor.js";
 
 // Direct-mode (no shard map) push lands under this single key; fleet-mode pushes
@@ -299,6 +299,37 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
     await kv.put(HEALTH_KEY, JSON.stringify(health)); // snapshot for the fleet dashboard
   }
   return health;
+}
+
+// Pull mode (RELAY_PULL_URL_TEMPLATE): fetch each relay's /metrics ourselves and
+// store it exactly where its push would land, so the rest of the monitor can't
+// tell the difference. This lets a second (mirror) monitor watch the fleet
+// without every relay having to push to it. A scrape that fails stores nothing,
+// so the usual liveness check (STALE_MINUTES) reports the host as not reporting.
+// The hosts come from the shard map; if it can't be fetched, the ones we pulled
+// last time. deps: { kv, fetchMap, scrape(url, authorization) }. Returns
+// { hosts, ok, failed: [{ host, error }] }.
+export async function pullRelays(env, now, { kv, fetchMap, scrape }, lastHosts = []) {
+  let hosts = lastHosts;
+  if (env.SHARD_MAP_URL && fetchMap) {
+    try { hosts = mapHostsFrom(await fetchMap(env.SHARD_MAP_URL)); }
+    catch { /* keep the last list; the analysis tick reports the map failure */ }
+  }
+  const authorization = env.RELAY_PULL_BASIC_AUTH
+    ? `Basic ${Buffer.from(env.RELAY_PULL_BASIC_AUTH).toString("base64")}` : null;
+  const failed = [];
+  let ok = 0;
+  await Promise.all(hosts.map(async (host) => {
+    const url = env.RELAY_PULL_URL_TEMPLATE.replace("{host}", host);
+    try {
+      const snapshot = parseRelayMetrics(await scrape(url, authorization));
+      await kv.put(latestKeyFor(host), JSON.stringify({ receivedAt: now, snapshot, pulled: true }));
+      ok += 1;
+    } catch (e) {
+      failed.push({ host, error: String((e && e.message) || e) });
+    }
+  }));
+  return { hosts, ok, failed };
 }
 
 // Local copy of the map->hosts projection so core doesn't depend on server; the

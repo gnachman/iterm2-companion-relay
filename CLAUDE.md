@@ -39,7 +39,18 @@ terminating TLS (Let's Encrypt) → relay, with the dashboard under `/dashboard/
 `RELAY_SERVICE_USER` / `DASHBOARD_SERVICE_USER` for fixed named accounts.
 The generated Caddyfile is rewritten on every full deploy, so other sites on
 the box (e.g. a push relay instance) go in their own files in
-`/etc/caddy/sites.d/*.caddy`, which it imports.
+`/etc/caddy/sites.d/*.caddy`, which it imports. Extra routes on the relay's own
+site go in `/etc/caddy/relay.d/*.caddy` (imported inside the site block); the
+templates are in `ops/relay.d/`: an authenticated `/metrics` for the pulling
+fleet monitors, and `/fleet` for a mirror monitor.
+
+## Fleet monitors
+
+`monitor/` runs on mcnachman.cloud (the one that emails; relays push to it) and
+as view-only mirrors on relay1 and relay2 (`https://relay{1,2}.iterm2.com/fleet`,
+`ALERT_EMAIL=off`, pulling each relay's `/metrics`). Install or update any of
+them with `monitor/ops/deploy.sh <ssh-host>` (ships the committed `monitor/`;
+commit first). See `monitor/README.md`.
 
 Current production instance: `relay1.iterm2.com` (Option A — Caddy + Let's Encrypt,
 gray-cloud DNS-only, IPv4-only).

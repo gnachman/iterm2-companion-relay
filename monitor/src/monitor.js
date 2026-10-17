@@ -241,6 +241,25 @@ export function normalizeSnapshot(s = {}) {
   };
 }
 
+// Pull mode: turn a relay's /metrics exposition (Prometheus text, `relay_`
+// prefix) into the same flat object the relay pushes, so a pulled snapshot goes
+// through exactly the analysis a pushed one does. Labeled series are summed into
+// one total (as the push does for the reason-labeled counters); the socket
+// lifetime histogram has no push counterpart and is skipped. Throws when the
+// text has no relay series at all (an HTML error page, a different app).
+export function parseRelayMetrics(text) {
+  const out = {};
+  for (const line of String(text).split("\n")) {
+    const m = /^relay_([a-z0-9_]+)(\{[^}]*\})?\s+(\S+)/.exec(line.trim());
+    if (!m || m[1].startsWith("socket_lifetime_seconds")) continue;
+    const v = Number(m[3]);
+    if (!Number.isFinite(v)) continue;
+    out[m[1]] = (out[m[1]] || 0) + v;
+  }
+  if (!Object.keys(out).length) throw new Error("no relay_ metrics in response");
+  return out;
+}
+
 // Per-interval deltas between the previous snapshot's counters and the current
 // one. A counter that went backwards means the relay restarted (counters reset
 // to ~0), so the interval is unmeasurable: flag `reset` and skip rate checks

@@ -16,6 +16,12 @@
 //   POST /ingest/<host>       (Authorization: Bearer INGEST_TOKEN)  fleet per-host push
 //   GET  /                    (x-monitor-key: MANUAL_TRIGGER_SECRET) dry-run analysis JSON
 //   GET  /?test=1             (x-monitor-key: MANUAL_TRIGGER_SECRET) send a REAL test email
+//   GET  /dashboard           (Basic auth, password MANUAL_TRIGGER_SECRET) fleet page
+//
+// Or, instead of waiting for pushes, the monitor can pull each relay's /metrics
+// itself (RELAY_PULL_URL_TEMPLATE). That is how a mirror monitor on another box
+// watches the same fleet without any relay pushing to it; with ALERT_EMAIL=off
+// it only serves the dashboard, so one outage doesn't email once per monitor.
 //
 // plus an internal timer (MONITOR_INTERVAL_MS, default 5 min). Run it behind a
 // TLS reverse proxy (Caddy or Apache): bind loopback here and proxy /ingest.
@@ -25,7 +31,7 @@ import { readFileSync } from "node:fs";
 import { randomBytes, timingSafeEqual } from "node:crypto";
 import { WebSocket } from "ws";
 
-import { run, LATEST_KEY, latestKeyFor, HEALTH_KEY } from "./core.js";
+import { run, pullRelays, LATEST_KEY, latestKeyFor, HEALTH_KEY } from "./core.js";
 import { probeHandshake, ownedRoomForHost, parseConfig, normalizeSnapshot } from "./monitor.js";
 import { fileStore } from "./store.js";
 
@@ -380,7 +386,7 @@ async function liveHealth(env, kv, now) {
   return { ...health, hosts, summary, at: now, probeAt: health.at };
 }
 
-function renderDashboard(health, now, detailTpl) {
+function renderDashboard(health, now, detailTpl, label = "") {
   const head = (title, refresh) =>
     `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">`
     + `<meta http-equiv=refresh content=${refresh}><title>${esc(title)}</title><style>${DASH_CSS}</style>`;
@@ -396,7 +402,8 @@ function renderDashboard(health, now, detailTpl) {
   const cards = health.hosts.slice()
     .sort((a, b) => rank(b.status) - rank(a.status) || a.host.localeCompare(b.host))
     .map((h) => cardHtml(h, detailTpl)).join("");
-  const mapLine = health.fleet ? `map v${esc(health.mapVersion ?? "?")}` : "direct mode";
+  const mapLine = (label ? `${esc(label)} &middot; ` : "")
+    + (health.fleet ? `map v${esc(health.mapVersion ?? "?")}` : "direct mode");
   const banner = health.mapError ? `<div class=banner>shard map fetch failed: ${esc(health.mapError)}</div>` : "";
   return `${head(`Relay fleet ${s.crit ? "⚠" : ""}`.trim(), 30)}<div class=wrap>`
     + `<header class="hdr ${overall}"><div class=big>${s.ok}/${s.total} healthy</div>`
@@ -461,7 +468,7 @@ export function createServer(env, deps) {
       // can override or set empty to disable the links.
       const detailTpl = "DASHBOARD_URL_TEMPLATE" in env ? env.DASHBOARD_URL_TEMPLATE : "https://{host}/dashboard/";
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", "cache-control": "no-store" });
-      res.end(renderDashboard(health, now, detailTpl));
+      res.end(renderDashboard(health, now, detailTpl, env.MONITOR_LABEL || ""));
       return;
     }
 
@@ -471,6 +478,9 @@ export function createServer(env, deps) {
         return json(res, { error: "not found" }, 404);
       }
       if (url.searchParams.get("test") === "1") {
+        if (/^(off|false|0|no)$/i.test(env.ALERT_EMAIL || "")) {
+          return json(res, { emailed: false, error: "ALERT_EMAIL=off (view-only monitor)" });
+        }
         try {
           await deps.sendEmail(env, [{
             key: "test", severity: "warn", title: "Relay monitor test",
@@ -498,7 +508,12 @@ function main() {
   if (envArg) loadEnvFile(envArg);
   const env = process.env;
 
-  for (const k of ["INGEST_TOKEN", "ALERT_FROM", "ALERT_TO", "RESEND_API_KEY"]) {
+  // A view-only monitor (ALERT_EMAIL=off) needs no mail settings, and one that
+  // pulls metrics needs no ingest token (it can still accept pushes if given one).
+  const emailOff = /^(off|false|0|no)$/i.test(env.ALERT_EMAIL || "");
+  const pull = !!env.RELAY_PULL_URL_TEMPLATE;
+  const required = [...(pull ? [] : ["INGEST_TOKEN"]), ...(emailOff ? [] : ["ALERT_FROM", "ALERT_TO", "RESEND_API_KEY"])];
+  for (const k of required) {
     if (!env[k]) {
       console.error(`relay-monitor: missing required env ${k}`);
       process.exit(1);
@@ -509,10 +524,12 @@ function main() {
   const port = Number(env.MONITOR_PORT || 8790);
   const stateDir = env.MONITOR_STATE_DIR || "./data";
   const intervalMs = Number(env.MONITOR_INTERVAL_MS || 5 * 60 * 1000);
+  const pullMs = Number(env.RELAY_PULL_MS || 60 * 1000);
 
   const deps = {
     kv: fileStore(stateDir),
-    sendEmail: sendResend,
+    // View-only: alerts are still computed and shown, just never mailed.
+    sendEmail: emailOff ? async () => {} : sendResend,
     fetchMap,
     probeOne: nodeProbe,
     roomForHost,
@@ -523,14 +540,33 @@ function main() {
   const tick = () => run(env, Date.now(), { ...deps, dry: false })
     .catch((e) => console.error("relay-monitor: tick failed:", (e && e.message) || e));
 
+  // Pull mode: scrape every relay on its own, faster timer (a push arrives about
+  // once a minute, so the dashboard's "seen" age stays comparable).
+  let pulledHosts = [];
+  const pullTick = () => pullRelays(env, Date.now(), {
+    kv: deps.kv, fetchMap, scrape: (url, authorization) => fetchText(url, 10_000, authorization),
+  }, pulledHosts).then((r) => {
+    pulledHosts = r.hosts;
+    for (const f of r.failed) console.error(`relay-monitor: pull ${f.host} failed: ${f.error}`);
+  }).catch((e) => console.error("relay-monitor: pull failed:", (e && e.message) || e));
+
   const server = createServer(env, deps);
   server.listen(port, host, () => {
     const mode = env.SHARD_MAP_URL ? `fleet (map: ${env.SHARD_MAP_URL})` : "direct";
     console.error(`relay-monitor: listening on http://${host}:${port} (${mode})`);
     console.error(`relay-monitor: analyzing every ${Math.round(intervalMs / 1000)}s; state in ${stateDir}`);
-    tick(); // run once at startup so a fresh box surfaces problems immediately
+    if (pull) console.error(`relay-monitor: pulling ${env.RELAY_PULL_URL_TEMPLATE} every ${Math.round(pullMs / 1000)}s`);
+    if (emailOff) console.error("relay-monitor: ALERT_EMAIL=off, alerts are not emailed");
+    // Run once at startup so a fresh box surfaces problems immediately (after a
+    // first pull, so a pulling monitor doesn't start with every host stale).
+    (pull ? pullTick() : Promise.resolve()).then(tick);
+    const pullTimer = pull ? setInterval(pullTick, pullMs) : null;
     const timer = setInterval(tick, intervalMs);
-    const shutdown = () => { clearInterval(timer); server.close(() => process.exit(0)); };
+    const shutdown = () => {
+      clearInterval(timer);
+      if (pullTimer) clearInterval(pullTimer);
+      server.close(() => process.exit(0));
+    };
     process.on("SIGTERM", shutdown);
     process.on("SIGINT", shutdown);
   });

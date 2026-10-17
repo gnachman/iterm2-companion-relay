@@ -43,9 +43,12 @@ Run the independent probe two or three times over ~30s:
 node tick.mjs
 ```
 
-Read the JSON: `verdict`, `controlsOk`, `hosts[].ok` / `.detail`, and `push.ok` /
-`.detail` (the push relay, push.iterm2.com; verdict `push-unreachable` means the
-relays are fine but push is not).
+Read the JSON: `verdict`, `controlsOk`, `hosts[].ok` / `.detail`, and `pushes[]`
+(each push relay; `push` is the primary, push.iterm2.com). Verdict
+`push-unreachable` means the relays are fine but the primary push relay is not;
+released apps only know the primary, so their pushes are failing even if push2
+is up. (`push-degraded`, only push2 down, never reaches you: the heartbeat
+treats it as healthy and the off-box monitor emails about it.)
 
 - If `verdict` becomes `ok`: it was a transient blip that already cleared. Go to
   "Transient". Do NOT page.
@@ -64,8 +67,8 @@ relays are fine but push is not).
    - Monitor says ok but you cannot reach it -> the break is on the path between
      THIS Mac and the relay (your ISP / a transit route), not the relay itself.
      Transient-local; do not page, but log it clearly.
-   - For `push-unreachable`, compare against the monitor's push relay card on
-     the same page instead of a relay row. For more detail, read the push
+   - For `push-unreachable`, compare against the monitor's push relay cards
+     (push.iterm2.com and push2.iterm2.com) on the same page instead of a relay row. For more detail, read the push
      dashboard's JSON (relay-dashboard Basic auth from watch.env, not the
      monitor password; run `set -a; . ./watch.env; set +a` first if unset):
      `curl -sS -u "$PUSH_DASHBOARD_USER:$PUSH_DASHBOARD_PASSWORD" 'https://mcnachman.cloud/push-dashboard/api/data?range=1h'`
@@ -77,7 +80,8 @@ relays are fine but push is not).
    https://<host>/` (a healthy WS-only endpoint returns 400; a timeout or 502/503
    corroborates a real inbound break). For push: `https://push.iterm2.com/`
    returns 405 when healthy; it sits behind Cloudflare, so 520-526 means the
-   origin is down while Cloudflare is fine.
+   origin is down while Cloudflare is fine. `https://push2.iterm2.com/` (relay2,
+   no Cloudflare) also returns 405 when healthy.
 
 REAL if the host is unreachable from this vantage across all retries, controls
 healthy, and the monitor also reports it down (or its public HTTPS is dead too).

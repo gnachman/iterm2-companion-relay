@@ -44,9 +44,13 @@ to look (attaching can cause a resize that briefly disrupts things).
 ## How it decides (and why it rarely pages)
 
 1. `tick.mjs` does a real owned-room mac-park handshake to every relay in the live
-   shard map, a GET to the push relay (push.iterm2.com, expects 405), PLUS control
+   shard map, a GET to each push relay (push.iterm2.com then push2.iterm2.com,
+   expect 405; `PUSH_PROBE_URLS`), PLUS control
    fetches (resolver/Cloudflare/Google) proving this Mac has internet. Verdict: `ok`, `some-relays-unreachable`, `all-relays-unreachable`,
-   `push-unreachable` (relays fine, push not), `mac-offline`, `map-unreachable`.
+   `push-unreachable` (relays fine, the PRIMARY push relay not: released apps only
+   know push.iterm2.com), `push-degraded` (only push2 down: no failover, users
+   unaffected; heartbeat logs it every 5 min but never wakes Claude, the off-box
+   monitor emails), `mac-offline`, `map-unreachable`.
 2. `mac-offline` / `tick-error` / `map-unreachable` (this Mac can't get a usable read
    of the fleet - no internet, probe error, or the shard map can't be fetched) ->
    heartbeat holds quietly, never wakes Claude, throttles logging, recovers on its

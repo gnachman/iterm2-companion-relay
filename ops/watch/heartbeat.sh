@@ -79,6 +79,24 @@ while true; do
 
   verdict="$(verdict_of state/tick.out)"
 
+  # Only a secondary push relay is down: released apps don't use it and pushes
+  # still flow, so this is not an incident (the off-box monitor emails about it).
+  # Treat it as healthy, but say so, at most every 5 min.
+  if [ "$verdict" = "push-degraded" ]; then
+    if [ "$incident" = 1 ]; then
+      log "recovered (a secondary push relay is still down); poking RESOLVED"
+      poke "RESOLVED: relays and the primary push relay are reachable again from this Mac; a secondary push relay is still down (no failover, users unaffected). Confirm, post recovery per PLAYBOOK.md, then stand down."
+      incident=0
+    fi
+    fails=0
+    now="$(date +%s)"
+    if [ $((now - ${last_degraded_log:-0})) -ge 300 ]; then
+      log "tick ok except a secondary push relay is down (push-degraded); not waking Claude"
+      last_degraded_log="$now"
+    fi
+    sleep "$QUIET_INTERVAL"; continue
+  fi
+
   # Conditions where this Mac cannot get a usable read of the fleet, so waking
   # Claude cannot help:
   #   mac-offline     - this Mac has no working internet at all.

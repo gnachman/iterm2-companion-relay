@@ -13,8 +13,11 @@
 // reads the JSON for triage. It also writes state/last.json for edge detection
 // (ok->fail, fail->ok) and as a liveness heartbeat.
 //
-// It also checks the push relay (push.iterm2.com) with a plain GET. A failure
-// there while every relay is fine is verdict "push-unreachable".
+// It also checks the push relays (push.iterm2.com, then push2.iterm2.com) with a
+// plain GET. While every relay is fine: the primary failing is verdict
+// "push-unreachable" (released apps only know the primary, so their pushes
+// fail), and only another instance failing is "push-degraded" (no failover,
+// but users are unaffected).
 //
 // The handshake mirrors the monitor's probe (monitor/src/{monitor,server}.js);
 // it is kept self-contained here so ops/watch only needs `ws`.
@@ -29,11 +32,15 @@ const HERE = dirname(fileURLToPath(import.meta.url));
 const MAP_URL = process.env.SHARD_MAP_URL || "https://resolver.iterm2.com/shardmap.json";
 const TIMEOUT_MS = Number(process.env.PROBE_TIMEOUT_MS || 10000);
 const STATE_DIR = process.env.WATCH_STATE_DIR || join(HERE, "state");
-// The push relay (APNs forwarder). Not in the shard map; it answers a plain GET
-// on / with 405, which proves DNS, Cloudflare, and the origin are all serving.
-// Mirrors the monitor's probePushOrigin (monitor/src/server.js). Set to an empty
-// string to skip the push check.
-const PUSH_PROBE_URL = process.env.PUSH_PROBE_URL ?? "https://push.iterm2.com/";
+// The push relays (APNs forwarders). Not in the shard map; each answers a plain
+// GET on / with 405, which proves DNS, any CDN, and the origin are all serving.
+// Mirrors the monitor's probePushOrigin (monitor/src/server.js). Comma-separated,
+// primary first; set to an empty string to skip the push check. The older
+// single PUSH_PROBE_URL is still honored when PUSH_PROBE_URLS is unset.
+const PUSH_PROBE_URLS = (process.env.PUSH_PROBE_URLS
+  ?? process.env.PUSH_PROBE_URL
+  ?? "https://push.iterm2.com/,https://push2.iterm2.com/")
+  .split(",").map((s) => s.trim()).filter(Boolean);
 
 // Control targets prove this box has working internet independent of the relays.
 // Mix providers on purpose: resolver.iterm2.com and cloudflare.com both ride
@@ -170,17 +177,22 @@ async function main() {
     hosts.push({ host, ok: r.ok, detail: r.detail, ms: Date.now() - t0 });
   }
 
-  let push = null;
-  if (PUSH_PROBE_URL) {
+  const pushes = [];
+  for (const url of PUSH_PROBE_URLS) {
     const t0 = Date.now();
-    push = { host: new URL(PUSH_PROBE_URL).host, ...(await probePush(PUSH_PROBE_URL)), ms: Date.now() - t0 };
+    pushes.push({ host: new URL(url).host, ...(await probePush(url)), ms: Date.now() - t0 });
   }
+  const push = pushes[0] ?? null; // the primary (kept as its own field for readers of `push`)
 
   const failed = hosts.filter((h) => !h.ok);
   let verdict;
   if (!controlsOk) verdict = "mac-offline";                       // cannot trust probe results
   else if (mapErr && hosts.length === 0) verdict = "map-unreachable";
-  else if (failed.length === 0) verdict = push && !push.ok ? "push-unreachable" : "ok";
+  else if (failed.length === 0) {
+    verdict = push && !push.ok ? "push-unreachable"
+      : pushes.some((p) => !p.ok) ? "push-degraded"
+      : "ok";
+  }
   else if (failed.length === hosts.length) verdict = "all-relays-unreachable";
   else verdict = "some-relays-unreachable";
 
@@ -194,6 +206,7 @@ async function main() {
     mapErr,
     hosts,
     push,
+    pushes,
   };
 
   try {

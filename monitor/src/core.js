@@ -22,7 +22,7 @@
 
 import {
   parseConfig, normalizeSnapshot, deltas, rollHour, hourKey, analyze, dueAlerts,
-  livenessAlert, probeAlert, parsePushMetrics, pushDeltas, pushAlerts, peerAlerts,
+  livenessAlert, probeAlert, parsePushMetrics, pushDeltas, pushAlerts, peerAlerts, pushRelaysFromEnv,
 } from "./monitor.js";
 
 // Direct-mode (no shard map) push lands under this single key; fleet-mode pushes
@@ -174,19 +174,21 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
     });
   }
 
-  // --- push relay (APNs forwarder on this box) ---
-  // Optional: enabled by PUSH_METRICS_URL. It is scraped, not pushed (it shares
-  // our host), and shows up as one more card in the fleet summary. Failure to
-  // scrape is the push relay's liveness signal; PUSH_PROBE_URL adds an outside-in
-  // check through DNS/edge/proxy. Both are debounced like the relay checks.
-  let nextPush = null;
-  if (env.PUSH_METRICS_URL && scrapePush) {
-    const label = env.PUSH_HOST_LABEL || "push";
-    const ps = state.push || {};
+  // --- push relays (APNs forwarders) ---
+  // Optional: PUSH_METRICS_URL enables the first, PUSH2_METRICS_URL a second
+  // instance, and so on (see pushRelaysFromEnv). Each is scraped, not pushed,
+  // and shows up as one more card in the fleet summary. Failure to scrape is a
+  // push relay's liveness signal; its PROBE_URL adds an outside-in check through
+  // DNS/edge/proxy. Both are debounced like the relay checks.
+  const nextPushes = {};
+  for (const relay of scrapePush ? pushRelaysFromEnv(env) : []) {
+    const label = relay.label;
+    // State is per relay label. (The first relay's used to be state.push.)
+    const ps = (state.pushes && state.pushes[label]) || (relay.index === 1 && state.push) || {};
     const reasons = [];
     let cur = null;
     let scrapeErr = null;
-    try { cur = parsePushMetrics(await scrapePush(env.PUSH_METRICS_URL)); }
+    try { cur = parsePushMetrics(await scrapePush(relay.metricsUrl, relay.metricsAuth)); }
     catch (e) { scrapeErr = String((e && e.message) || e); }
 
     const scrapeFailStreak = cur ? 0 : (ps.scrapeFailStreak || 0) + 1;
@@ -199,7 +201,7 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
     }
 
     let probe = null;
-    if (env.PUSH_PROBE_URL && probePush) probe = await probePush(env.PUSH_PROBE_URL, cfg.probeTimeoutMs);
+    if (relay.probeUrl && probePush) probe = await probePush(relay.probeUrl, cfg.probeTimeoutMs);
     const probeFailStreak = !probe || probe.ok ? 0 : (ps.probeFailStreak || 0) + 1;
     if (probe && !probe.ok) {
       reasons.push("probe");
@@ -232,7 +234,7 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
       ageMs: cur ? 0 : null,
       probeOk: probe ? probe.ok : null,
       reasons,
-      detailUrl: env.PUSH_DASHBOARD_URL || null,
+      detailUrl: relay.dashboardUrl,
       push: cur ? {
         devices: cur.gauges.devices,
         sessions: cur.gauges.sessions,
@@ -251,7 +253,7 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
     // Keep the previous good counters across a failed scrape so the next success
     // still has a baseline (a restart is then caught by the backwards counter).
     // The peer baseline and streak carry across a failed scrape the same way.
-    nextPush = {
+    nextPushes[label] = {
       prev: cur ? cur.counters : ps.prev,
       prevPeer: cur ? cur.peer : (ps.prevPeer || null),
       peerOutboxStreak: cur ? peerOutboxStreak : (ps.peerOutboxStreak || 0),
@@ -276,7 +278,7 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
 
   const nextState = { hosts: nextHosts };
   if (fleet) nextState.mapFailStreak = mapFailStreak; // debounce state for the shard-map fetch
-  if (nextPush) nextState.push = nextPush;
+  if (Object.keys(nextPushes).length) nextState.pushes = nextPushes;
   if (!dry) {
     let delivered = true;
     if (due.length) {

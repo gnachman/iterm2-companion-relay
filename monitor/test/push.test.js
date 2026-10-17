@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
-import { parsePushMetrics, pushDeltas, pushAlerts, peerAlerts, parseConfig } from "../src/monitor.js";
+import { parsePushMetrics, pushDeltas, pushAlerts, peerAlerts, parseConfig, pushRelaysFromEnv } from "../src/monitor.js";
 import { run } from "../src/core.js";
 import { fileStore } from "../src/store.js";
 import { createServer, fetchText, probePushOrigin } from "../src/server.js";
@@ -126,6 +126,24 @@ describe("peerAlerts", () => {
   });
 });
 
+describe("pushRelaysFromEnv", () => {
+  it("reads the first relay from PUSH_ and more from PUSH2_, PUSH3_ ...", () => {
+    const relays = pushRelaysFromEnv({
+      PUSH_METRICS_URL: "http://127.0.0.1:8790/metrics", PUSH_HOST_LABEL: "push.example",
+      PUSH2_METRICS_URL: "https://push2.example/metrics", PUSH2_HOST_LABEL: "push2.example",
+      PUSH2_PROBE_URL: "https://push2.example/", PUSH2_METRICS_BASIC_AUTH: "monitor:pw",
+    });
+    expect(relays.map((r) => r.label)).toEqual(["push.example", "push2.example"]);
+    expect(relays[0]).toMatchObject({ index: 1, metricsAuth: null, probeUrl: null });
+    expect(relays[1]).toMatchObject({ index: 2, probeUrl: "https://push2.example/",
+      metricsAuth: `Basic ${Buffer.from("monitor:pw").toString("base64")}` });
+  });
+  it("is empty without PUSH_METRICS_URL, and labels default", () => {
+    expect(pushRelaysFromEnv({})).toEqual([]);
+    expect(pushRelaysFromEnv({ PUSH3_METRICS_URL: "u" })[0].label).toBe("push3");
+  });
+});
+
 describe("run(): push relay wiring", () => {
   const NOW = Date.parse("2026-10-14T12:00:00.000Z");
   const env = (extra = {}) => ({
@@ -160,6 +178,37 @@ describe("run(): push relay wiring", () => {
     expect(p.push.lastDeliveryAgeMs).toBe(90_000);
     expect(p.push.delivered).toBeNull();            // first tick: no baseline yet
     expect(health.summary.total).toBe(2);           // relay + push
+  });
+
+  it("shows a card per push relay, each with its own auth and state", async () => {
+    const kv = kvOf(); await seed(kv);
+    const seen = [];
+    const env2 = { PUSH2_METRICS_URL: "https://push2.example/metrics", PUSH2_HOST_LABEL: "push2.example",
+      PUSH2_PROBE_URL: "https://push2.example/", PUSH2_METRICS_BASIC_AUTH: "monitor:pw" };
+    const scrape = async (url, auth) => {
+      seen.push([url, auth]);
+      return url.includes("push2") ? expo({ devices: 9, push: 3, delivered: 3 }) : expo({ devices: 4, push: 5, delivered: 5 });
+    };
+    await tick(kv, null, { env: env2, scrape });
+    const { health } = await tick(kv, null, { env: env2, scrape, now: NOW + 300_000 });
+    const cards = health.hosts.filter((x) => x.kind === "push");
+    expect(cards.map((c) => c.host)).toEqual(["push.example", "push2.example"]);
+    expect(cards.map((c) => c.push.devices)).toEqual([4, 9]);
+    expect(cards.map((c) => c.push.delivered)).toEqual([0, 0]); // each against its own baseline
+    expect(seen[1]).toEqual(["https://push2.example/metrics", `Basic ${Buffer.from("monitor:pw").toString("base64")}`]);
+    expect(seen[0][1]).toBeNull();
+    const state = JSON.parse(kv.m.get("state"));
+    expect(Object.keys(state.pushes)).toEqual(["push.example", "push2.example"]);
+    expect(health.summary.total).toBe(3);
+  });
+
+  it("carries the single-relay state (state.push) over to the first relay", async () => {
+    const kv = kvOf(); await seed(kv);
+    const state = { push: { prev: { pushes: 5, delivered: 5, failed: 0, timeouts: 0, authRejects: 0 } } };
+    await kv.put("state", JSON.stringify(state));
+    const { health } = await tick(kv, expo({ push: 8, delivered: 7 }));
+    expect(pushHost(health).push.delivered).toBe(2); // used the old baseline
+    expect(JSON.parse(kv.m.get("state")).push).toBeUndefined();
   });
 
   it("is a no-op when PUSH_METRICS_URL is unset", async () => {
@@ -257,6 +306,19 @@ describe("scrape + probe helpers (real http)", () => {
   const serve = (handler) => new Promise((resolve) => {
     const s = http.createServer(handler);
     s.listen(0, "127.0.0.1", () => { closers.push(() => s.close()); resolve(`http://127.0.0.1:${s.address().port}/`); });
+  });
+
+  it("fetchText sends an Authorization header when given one", async () => {
+    let got = null;
+    const srv = http.createServer((req, res) => { got = req.headers.authorization || null; res.end("ok"); });
+    await new Promise((r) => srv.listen(0, "127.0.0.1", r));
+    try {
+      const url = `http://127.0.0.1:${srv.address().port}/metrics`;
+      await fetchText(url, 5000, "Basic abc");
+      expect(got).toBe("Basic abc");
+      await fetchText(url);
+      expect(got).toBeNull();
+    } finally { srv.close(); }
   });
 
   it("fetchText returns the body and throws on non-2xx", async () => {

@@ -421,6 +421,31 @@ export function dueAlerts(alerts, prev, now, cooldownMs) {
 }
 
 // --- push relay (the APNs forwarder) ---
+
+// The push relays to watch, from the environment: PUSH_METRICS_URL,
+// PUSH_PROBE_URL, PUSH_HOST_LABEL, PUSH_DASHBOARD_URL, PUSH_METRICS_BASIC_AUTH
+// for the first, and the same with PUSH2_, PUSH3_ ... (up to 9) for more
+// instances. A relay is included when its METRICS_URL is set. METRICS_BASIC_AUTH
+// is "user:password", for a relay on another host whose /metrics sits behind
+// HTTP basic auth.
+export function pushRelaysFromEnv(env) {
+  const relays = [];
+  for (let n = 1; n <= 9; n++) {
+    const p = n === 1 ? "PUSH_" : `PUSH${n}_`;
+    const metricsUrl = env[`${p}METRICS_URL`];
+    if (!metricsUrl) continue;
+    const basic = env[`${p}METRICS_BASIC_AUTH`];
+    relays.push({
+      index: n,
+      label: env[`${p}HOST_LABEL`] || (n === 1 ? "push" : `push${n}`),
+      metricsUrl,
+      metricsAuth: basic ? `Basic ${Buffer.from(basic).toString("base64")}` : null,
+      probeUrl: env[`${p}PROBE_URL`] || null,
+      dashboardUrl: env[`${p}DASHBOARD_URL`] || null,
+    });
+  }
+  return relays;
+}
 // Unlike the relays, the push relay does not push to us: it is on the monitor's
 // own box, so each tick scrapes its loopback /metrics (Prometheus text) and
 // compares to the previous tick. These are pure: text/counters in, alerts out.

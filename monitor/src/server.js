@@ -216,8 +216,11 @@ function readBody(req, limitBytes = 64 * 1024) {
 
 // GET a URL and return its body text; throws on a non-2xx or timeout. Used to
 // read the push relay's loopback /metrics.
-export async function fetchText(url, timeoutMs = 10_000) {
-  const res = await fetch(url, { signal: AbortSignal.timeout(timeoutMs) });
+export async function fetchText(url, timeoutMs = 10_000, authorization = null) {
+  const res = await fetch(url, {
+    headers: authorization ? { authorization } : {},
+    signal: AbortSignal.timeout(timeoutMs),
+  });
   if (!res.ok) throw new Error(`HTTP ${res.status}`);
   return res.text();
 }
@@ -513,7 +516,7 @@ function main() {
     fetchMap,
     probeOne: nodeProbe,
     roomForHost,
-    scrapePush: fetchText,
+    scrapePush: (url, authorization) => fetchText(url, 10_000, authorization),
     probePush: probePushOrigin,
   };
 

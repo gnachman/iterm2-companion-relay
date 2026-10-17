@@ -19,6 +19,8 @@ QUIET_INTERVAL="${WATCH_QUIET_INTERVAL:-120}" # seconds between checks while hea
 RETRY_INTERVAL="${WATCH_RETRY_INTERVAL:-20}"  # seconds between confirm re-checks
 CONFIRM_FAILS="${WATCH_CONFIRM_FAILS:-2}"     # consecutive relay fails before waking Claude
 REPOKE_SECONDS="${WATCH_REPOKE_SECONDS:-900}" # re-nudge an unresolved incident at most this often
+NOTIFY_CHECK_INTERVAL="${WATCH_NOTIFY_CHECK_INTERVAL:-600}" # seconds between paging-path checks
+NOTIFY_REMIND_SECONDS="${WATCH_NOTIFY_REMIND_SECONDS:-21600}" # re-email a still-broken paging path
 mkdir -p state incidents
 
 log()        { printf '%s %s\n' "$(date '+%Y-%m-%dT%H:%M:%S%z')" "$*" | tee -a state/heartbeat.log; }
@@ -59,12 +61,52 @@ cat <<'BANNER'
 ================================================================================
 BANNER
 log "heartbeat up (quiet=${QUIET_INTERVAL}s retry=${RETRY_INTERVAL}s confirm=${CONFIRM_FAILS})"
+# The paging path is checked on its own schedule (check-notify.sh), because a
+# watcher whose pages can't be delivered is useless and would otherwise only find
+# out at the next real incident (it did, 2026-10-16). A problem is emailed, since
+# the phone push may be the thing that's broken; email.sh failing too is logged.
+notify_broken=0
+notify_checked=0
+last_notify_check=0
+last_notify_mail=0
+check_paging() {
+  local now out
+  now="$(date +%s)"
+  [ $((now - last_notify_check)) -ge "$NOTIFY_CHECK_INTERVAL" ] || return 0
+  last_notify_check="$now"
+  if out="$(./check-notify.sh 2>&1)"; then
+    [ "$notify_checked" = 1 ] || log "paging path ok (checked every ${NOTIFY_CHECK_INTERVAL}s)"
+    notify_checked=1
+    if [ "$notify_broken" = 1 ]; then
+      log "paging path fixed"
+      ./email.sh "paging path fixed" "The relay watcher can page your phone again." 2>>state/heartbeat.log \
+        || log "WARN: could not email that the paging path is fixed"
+      notify_broken=0
+    fi
+    return 0
+  fi
+  log "PAGING PATH BROKEN: $(printf '%s' "$out" | tr '\n' ';')"
+  if [ "$notify_broken" = 0 ] || [ $((now - last_notify_mail)) -ge "$NOTIFY_REMIND_SECONDS" ]; then
+    if ./email.sh "paging path broken" "The relay watcher on your Mac cannot page your phone, so it would miss telling you about an outage:
+
+$out
+
+Fix it, then check with: ops/watch/check-notify.sh" 2>>state/heartbeat.log; then
+      last_notify_mail="$now"
+    else
+      log "WARN: could not email about the broken paging path either"
+    fi
+  fi
+  notify_broken=1
+}
+
 fails=0
 incident=0        # 1 while we believe an incident is active
 last_poke=0
 offline=0         # 1 while this Mac itself has no working internet
 last_offline_log=0
 while true; do
+  check_paging
   if node tick.mjs > state/tick.out 2> state/tick.err; then
     if [ "$offline" = 1 ]; then log "fleet readable again from this Mac; resuming normal watch"; offline=0; fi
     if [ "$incident" = 1 ]; then

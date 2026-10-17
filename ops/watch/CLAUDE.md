@@ -100,23 +100,27 @@ sudo and risks this Mac's own relay connection.
 
 ## Paging the phone (works headless)
 
-`notify.sh` pages George's phone by shelling out to `~/bin/it2-notify <title> <body>`,
-a real network push. This works from Claude's Bash tool and the heartbeat (no tty
-required) - it replaced the old OSC 9 -> `/dev/tty` scheme, which could never reach a
-subprocess with no controlling terminal. Verified end to end 2026-09-08 from a
-confirmed no-tty context (both delivered).
+`notify.sh` pages George's phone by shelling out to `~/bin/it2-notify`, a real
+network push that works from Claude's Bash tool and the heartbeat (no tty needed).
+Call it `notify.sh "TITLE" "body"` (preferred) or `notify.sh "single message"`
+(title defaults to `relay-watch`).
 
-- Credentials `ITERM_PUSH_TOKEN` / `ITERM_PUSH_SECRET` live in `watch.env` (gitignored);
-  the session exports them, and `notify.sh` self-sources `watch.env` as a fallback, so
-  it works even if invoked outside the session.
-- Call it `notify.sh "TITLE" "body"` (preferred) or `notify.sh "single message"`
-  (1-arg form the playbook uses; title defaults to `relay-watch`).
-- It tries `push.iterm2.com`, then `push2.iterm2.com` (override with
-  `NOTIFY_PUSH_URLS`), so a page still goes out while mcnachman.cloud is down. The
-  relays share registrations, so either reaches the phone. The log line names the
-  relay that delivered and any that failed first.
-- Every page is appended to `state/notify.log`. If creds are missing it logs + prints
-  to stderr and exits non-zero rather than silently dropping the page.
+- **Credentials** come from the iTerm2 app's own storage on every call
+  (`pushcreds.sh`, via `it2-notify --print-secrets`). There is deliberately no copy
+  in `watch.env`, and inherited `ITERM_PUSH_*` values are ignored: a copy went stale
+  when the phone was re-paired, and every page silently failed with 403 "bad secret"
+  through the 2026-10-16 outage.
+- **Relays:** it tries `push.iterm2.com`, then `push2.iterm2.com` (override with
+  `NOTIFY_PUSH_URLS`), so a page still goes out while mcnachman.cloud is down.
+- **Email fallback:** if no relay delivers, it emails the page (`email.sh`, Resend;
+  `RESEND_API_KEY`/`ALERT_FROM`/`ALERT_TO` in `watch.env`) with the push error. It
+  exits 0 when George was reached either way, non-zero only if both failed.
+- **Checked continuously:** the heartbeat runs `check-notify.sh` every 10 min
+  (`WATCH_NOTIFY_CHECK_INTERVAL`): it2-notify present, stored credentials readable,
+  email configured. A failure is logged (`PAGING PATH BROKEN`) and emailed, again
+  every 6 h while it lasts, and once more when fixed. It can't prove the relay
+  accepts the credentials without sending a visible push.
+- Every page is appended to `state/notify.log`.
 
 ## Investigating a relay from here (read-only, on-box)
 
@@ -145,11 +149,14 @@ a shard-map-fetch alert is diagnosable from `./probe-relay.sh journal`.
 - `run.sh` - idempotent bootstrap of the tmux session
 - `ROLE.txt` - Claude's standing role prompt
 - `PLAYBOOK.md` - the triage procedure Claude follows on a `TRIAGE:` poke
-- `notify.sh` - phone page via `~/bin/it2-notify` (works headless; see above)
+- `notify.sh` - phone page via `~/bin/it2-notify`, email if push fails (see above)
+- `pushcreds.sh` - loads the app's stored push credentials (sourced)
+- `email.sh` - email via Resend, the second channel
+- `check-notify.sh` - checks the paging path without sending (run by the heartbeat)
 - `probe-relay.sh` - read-only on-box relay diagnostics (journal/metrics/status)
 - `.claude/settings.json` - auto mode + hard deny list (raw ssh/sudo denied; only
   `probe-relay.sh` and read-only text filters allowed)
-- `watch.env` - local config incl. `MONITOR_PASSWORD` + `ITERM_PUSH_*` (gitignored)
+- `watch.env` - local config incl. `MONITOR_PASSWORD` + the Resend key (gitignored)
 - `state/` - runtime: `heartbeat.log`, `tick.out`, `last.json`, `transients.log` (gitignored)
 - `incidents/` - incident reports Claude writes (gitignored)
 

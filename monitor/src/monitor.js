@@ -328,6 +328,16 @@ export function parseConfig(env = {}) {
     pushTimeoutCrit: n(env.PUSH_TIMEOUT_CRIT, 3),       // APNs timeouts => critical
     pushFailMinAttempts: n(env.PUSH_FAIL_MIN_ATTEMPTS, 5),
     pushFailRatio: n(env.PUSH_FAIL_RATIO, 0.8),          // failed/(delivered+failed) => warn
+    // Push relay peering (a second push relay instance; see Companion/PushRelay
+    // host/peer.js in the iTerm2 repo). Ticks in a row with registrations still
+    // waiting to reach the peer before warning (the startup backlog drains in
+    // minutes, so 3 ticks ~= 15 min is not that), and clock-difference limits.
+    peerOutboxStreak: Math.max(1, n(env.PUSH_PEER_OUTBOX_STREAK, 3)),
+    peerSkewWarnMs: n(env.PUSH_PEER_SKEW_WARN_MS, 2000),
+    peerSkewCritMs: n(env.PUSH_PEER_SKEW_CRIT_MS, 30000),
+    // The peer answers our relay's minutely hello, so this long without an
+    // authenticated answer means it's down or misconfigured.
+    peerSilentMs: n(env.PUSH_PEER_SILENT_MS, 10 * 60 * 1000),
   };
 }
 
@@ -427,6 +437,18 @@ const PUSH_AUTH_REASONS = new Set([
 export function parsePushMetrics(text) {
   const counters = { pushes: 0, delivered: 0, failed: 0, timeouts: 0, authRejects: 0 };
   const gauges = { sessions: 0, devices: 0, lastDeliveryTs: 0 };
+  // The peer counters are always exported, but the outbox gauge only when the
+  // push relay has a peer configured. Without it `peer` is null, which turns
+  // the peer checks off.
+  const peer = { outbox: 0, skewMs: 0, dropped: 0, rejected: 0, lastOkTs: 0 };
+  let peerConfigured = false;
+  const peerSeries = {
+    pushrelay_peer_outbox: "outbox",
+    pushrelay_peer_clock_skew_ms: "skewMs",
+    pushrelay_peer_forward_dropped_total: "dropped",
+    pushrelay_peer_rejected_total: "rejected",
+    pushrelay_peer_last_ok_timestamp_seconds: "lastOkTs",
+  };
   const plain = {
     pushrelay_push_total: ["c", "pushes"],
     pushrelay_push_delivered_total: ["c", "delivered"],
@@ -445,12 +467,18 @@ export function parsePushMetrics(text) {
     if (!Number.isFinite(value)) continue;
     const hit = plain[m[1]];
     if (hit && !m[2]) { (hit[0] === "c" ? counters : gauges)[hit[1]] = value; continue; }
+    if (peerSeries[m[1]] && !m[2]) {
+      peer[peerSeries[m[1]]] = value;
+      if (m[1] === "pushrelay_peer_last_ok_timestamp_seconds") peer.hasLastOk = true;
+      if (m[1] === "pushrelay_peer_outbox") peerConfigured = true;
+      continue;
+    }
     if (m[1] === "pushrelay_apns_rejected_total") {
       const reason = /reason="([^"]*)"/.exec(m[2] || "");
       if (reason && PUSH_AUTH_REASONS.has(reason[1])) counters.authRejects += value;
     }
   }
-  return { counters, gauges };
+  return { counters, gauges, peer: peerConfigured ? peer : null };
 }
 
 // Reset-aware interval between two counter snapshots. A counter that went
@@ -506,6 +534,91 @@ export function pushAlerts(interval, cfg) {
       title: `Push delivery failing (${interval.failed}/${attempts})`,
       body: `${interval.failed} of ${attempts} pushes that reached APNs handling failed since the last check.`,
     });
+  }
+  return alerts;
+}
+
+// Alerts for the push relay's peering with a second instance. `peer` is
+// parsePushMetrics().peer for this tick (null = no peer configured), `prevPeer`
+// the previous tick's, and `outboxStreak` how many ticks in a row the outbox
+// has been non-empty. `now` is unix ms. `neverAnsweredSince` is when the
+// monitor first saw the relay report that its peer hasn't answered since it
+// started (lastOkTs 0), or null: a relay that just restarted reports 0 until
+// its first exchange with the peer, so that only counts as silence once it has
+// lasted peerSilentMs.
+//  - Outbox stuck: registrations aren't reaching the other instance (it's down,
+//    misrouted, or the shared secret differs). Pushes still work through this
+//    one, so it's a warning: redundancy is degraded, not delivery.
+//  - Clock skew: records are ordered by the relays' clocks, so a large
+//    difference can let an old secret overwrite a re-paired one.
+//  - Dropped / rejected: the peer refused a record as malformed, or something
+//    reached /peer/register with a bad secret or body (misconfiguration or
+//    someone probing), or from a peer whose clock is more than an hour off.
+export function peerAlerts(peer, prevPeer, outboxStreak, cfg, now = Date.now(), neverAnsweredSince = null) {
+  const alerts = [];
+  if (!peer) return alerts;
+  // Older push relays don't export the liveness gauge (lastOkTs stays 0 with no
+  // series), so only judge it when present: a 0 then means never answered.
+  if (peer.hasLastOk) {
+    const silentMs = peer.lastOkTs > 0
+      ? now - peer.lastOkTs * 1000
+      : now - (neverAnsweredSince ?? now);
+    if (silentMs >= cfg.peerSilentMs) {
+      alerts.push({
+        key: "peer_silent",
+        severity: "warn",
+        title: "Push relay peer not answering",
+        body: (peer.lastOkTs > 0
+          ? `The other push relay last answered ${Math.round(silentMs / 60000)} min ago.`
+          : "The other push relay hasn't answered since this one started.") +
+          " Pushes still work through this one, but there's no failover. Check that the peer is up and " +
+          "PUSH_PEER_URL / PUSH_PEER_SECRET match.",
+      });
+    }
+  }
+  if (outboxStreak >= cfg.peerOutboxStreak) {
+    alerts.push({
+      key: "peer_outbox",
+      severity: "warn",
+      title: `Push relay peer not receiving (${peer.outbox} queued)`,
+      body: `${peer.outbox} registration(s) have been waiting to reach the other push relay for ` +
+        `${outboxStreak} checks. Pushes still work through this one, but devices that register here ` +
+        `can't fail over. Check that the peer is up and PUSH_PEER_URL / PUSH_PEER_SECRET match.`,
+    });
+  }
+  const skew = Math.abs(peer.skewMs);
+  if (skew >= cfg.peerSkewWarnMs) {
+    alerts.push({
+      key: "peer_skew",
+      severity: skew >= cfg.peerSkewCritMs ? "critical" : "warn",
+      title: `Push relay clocks differ by ${(peer.skewMs / 1000).toFixed(1)}s`,
+      body: `The other push relay's clock differs from this one's by ${peer.skewMs}ms. Registrations ` +
+        `are ordered by these clocks, so a large difference can let an old secret replace a re-paired ` +
+        `one. Check NTP (timedatectl) on both hosts.`,
+    });
+  }
+  if (prevPeer) {
+    const dropped = peer.dropped - prevPeer.dropped;
+    const rejected = peer.rejected - prevPeer.rejected;
+    if (dropped > 0) {
+      alerts.push({
+        key: "peer_dropped",
+        severity: "warn",
+        title: `Push relay peer refused ${dropped} record(s)`,
+        body: `The other push relay rejected ${dropped} registration(s) as malformed since the last ` +
+          `check, so they were dropped. The two instances may be running different code.`,
+      });
+    }
+    if (rejected > 0) {
+      alerts.push({
+        key: "peer_rejected",
+        severity: "warn",
+        title: `Push relay refused ${rejected} peer request(s)`,
+        body: `${rejected} request(s) to /peer/register were refused since the last check: a wrong ` +
+          `secret or malformed body (a PUSH_PEER_SECRET mismatch, or someone probing the endpoint), or ` +
+          `records from a peer whose clock is more than an hour off.`,
+      });
+    }
   }
   return alerts;
 }

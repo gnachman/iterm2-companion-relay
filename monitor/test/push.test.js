@@ -7,7 +7,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import http from "node:http";
-import { parsePushMetrics, pushDeltas, pushAlerts, parseConfig } from "../src/monitor.js";
+import { parsePushMetrics, pushDeltas, pushAlerts, peerAlerts, parseConfig } from "../src/monitor.js";
 import { run } from "../src/core.js";
 import { fileStore } from "../src/store.js";
 import { createServer, fetchText, probePushOrigin } from "../src/server.js";
@@ -30,11 +30,26 @@ pushrelay_apns_rejected_total{reason="BadEnvironmentKeyInToken"} ${v.envRejects 
 `;
 };
 
+// The peering lines a push relay with PUSH_PEER_URL adds. The counters are
+// exported even without a peer; the outbox gauge only with one.
+const peerExpo = ({ outbox = 0, skew = 0, dropped = 0, rejected = 0, configured = true } = {}) =>
+  `pushrelay_peer_forward_dropped_total ${dropped}
+pushrelay_peer_rejected_total ${rejected}
+` + (configured ? `pushrelay_peer_outbox ${outbox}
+pushrelay_peer_clock_skew_ms ${skew}
+` : "");
+
 describe("parsePushMetrics", () => {
   it("reads counters, gauges and sums only key/auth-class rejections", () => {
     const { counters, gauges } = parsePushMetrics(expo({ push: 9, delivered: 6, failed: 3, timeouts: 2, authRejects: 1, envRejects: 2, last: 1700000000 }));
     expect(counters).toEqual({ pushes: 9, delivered: 6, failed: 3, timeouts: 2, authRejects: 3 });   // BadDeviceToken excluded
     expect(gauges).toEqual({ sessions: 1, devices: 4, lastDeliveryTs: 1700000000 });
+  });
+  it("reads the peer metrics only when a peer is configured", () => {
+    expect(parsePushMetrics(expo()).peer).toBeNull();
+    expect(parsePushMetrics(expo() + peerExpo({ configured: false, dropped: 2 })).peer).toBeNull();
+    expect(parsePushMetrics(expo() + peerExpo({ outbox: 3, skew: -40, dropped: 1, rejected: 2 })).peer)
+      .toEqual({ outbox: 3, skewMs: -40, dropped: 1, rejected: 2, lastOkTs: 0 });
   });
   it("tolerates garbage and an empty body (everything 0)", () => {
     const { counters } = parsePushMetrics("not metrics\n\n# comment\npushrelay_push_total banana\n");
@@ -71,6 +86,43 @@ describe("pushAlerts", () => {
   it("flags everything failing only over enough attempts", () => {
     expect(pushAlerts(iv({ delivered: 1, failed: 4 }), CFG)[0]).toMatchObject({ key: "push_failures", severity: "warn" });
     expect(pushAlerts(iv({ delivered: 0, failed: 2 }), CFG)).toEqual([]);    // too few to say
+  });
+});
+
+describe("peerAlerts", () => {
+  const peer = (o) => ({ outbox: 0, skewMs: 0, dropped: 0, rejected: 0, ...o });
+  const keys = (alerts) => alerts.map((a) => a.key);
+
+  it("is silent without a peer and for a healthy one", () => {
+    expect(peerAlerts(null, null, 9, CFG)).toEqual([]);
+    expect(peerAlerts(peer({ skewMs: 18 }), peer({}), 0, CFG)).toEqual([]);
+  });
+  it("warns on an outbox that stays non-empty for the streak", () => {
+    expect(peerAlerts(peer({ outbox: 4 }), null, CFG.peerOutboxStreak - 1, CFG)).toEqual([]);
+    const [a] = peerAlerts(peer({ outbox: 4 }), null, CFG.peerOutboxStreak, CFG);
+    expect(a).toMatchObject({ key: "peer_outbox", severity: "warn" });
+  });
+  it("grades clock skew in either direction", () => {
+    expect(peerAlerts(peer({ skewMs: -2500 }), null, 0, CFG)[0]).toMatchObject({ key: "peer_skew", severity: "warn" });
+    expect(peerAlerts(peer({ skewMs: 45_000 }), null, 0, CFG)[0]).toMatchObject({ key: "peer_skew", severity: "critical" });
+  });
+  it("warns when the peer hasn't answered for a while (if the relay reports it)", () => {
+    const NOW = 1_800_000_000_000;
+    const live = peer({ hasLastOk: true, lastOkTs: NOW / 1000 - 60 });
+    expect(peerAlerts(live, null, 0, CFG, NOW)).toEqual([]);
+    const stale = peer({ hasLastOk: true, lastOkTs: NOW / 1000 - 3600 });
+    expect(peerAlerts(stale, null, 0, CFG, NOW)[0]).toMatchObject({ key: "peer_silent", severity: "warn" });
+    // "Never answered" only counts once it has lasted the silence threshold.
+    const never = peer({ hasLastOk: true, lastOkTs: 0 });
+    expect(peerAlerts(never, null, 0, CFG, NOW, NOW)).toEqual([]);
+    expect(peerAlerts(never, null, 0, CFG, NOW, NOW - CFG.peerSilentMs)[0]).toMatchObject({ key: "peer_silent" });
+    expect(peerAlerts(peer({ lastOkTs: 0 }), null, 0, CFG, NOW)).toEqual([]); // older relay: no gauge
+  });
+  it("warns on new drops and bad peer requests, but needs a baseline", () => {
+    expect(peerAlerts(peer({ dropped: 5, rejected: 5 }), null, 0, CFG)).toEqual([]);
+    expect(keys(peerAlerts(peer({ dropped: 5, rejected: 7 }), peer({ dropped: 4, rejected: 7 }), 0, CFG)))
+      .toEqual(["peer_dropped"]);
+    expect(keys(peerAlerts(peer({ rejected: 1 }), peer({}), 0, CFG))).toEqual(["peer_rejected"]);
   });
 });
 
@@ -124,6 +176,43 @@ describe("run(): push relay wiring", () => {
     expect(pushHost(health).status).toBe("crit");
     expect(pushHost(health).reasons).toContain("apns_timeouts");
     expect(sent.map((a) => a.title)).toContain("[push.example] APNs timeouts: 3");
+  });
+
+  it("shows the peer on the card and pages only after the outbox stays stuck", async () => {
+    const kv = kvOf(); await seed(kv);
+    const stuck = expo() + peerExpo({ outbox: 12, skew: 18 });
+    for (let i = 0; i < CFG.peerOutboxStreak - 1; i++) {
+      const { health, sent } = await tick(kv, stuck, { now: NOW + i * 300_000 });
+      expect(pushHost(health).status).toBe("ok");
+      expect(pushHost(health).push).toMatchObject({ peerOutbox: 12, peerSkewMs: 18 });
+      expect(sent).toEqual([]);
+    }
+    const { health, sent } = await tick(kv, stuck, { now: NOW + CFG.peerOutboxStreak * 300_000 });
+    expect(pushHost(health).status).toBe("warn");
+    expect(pushHost(health).reasons).toContain("peer_outbox");
+    expect(sent.map((a) => a.title)).toContain("[push.example] Push relay peer not receiving (12 queued)");
+
+    // Drained: the streak resets.
+    const drained = await tick(kv, expo() + peerExpo({ outbox: 0 }), { now: NOW + 10 * 300_000 });
+    expect(pushHost(drained.health).status).toBe("ok");
+  });
+
+  it("doesn't warn about a peer right after the push relay restarts", async () => {
+    const kv = kvOf(); await seed(kv);
+    const restarted = expo() + peerExpo() + "pushrelay_peer_last_ok_timestamp_seconds 0\n";
+    const first = await tick(kv, restarted);
+    expect(pushHost(first.health).reasons).not.toContain("peer_silent");
+    expect(first.sent).toEqual([]);
+    // Still never answered 15 minutes later: now it warns.
+    const later = await tick(kv, restarted, { now: NOW + 15 * 60 * 1000 });
+    expect(pushHost(later.health).reasons).toContain("peer_silent");
+  });
+
+  it("a large peer clock difference makes the card critical", async () => {
+    const kv = kvOf(); await seed(kv);
+    const { health } = await tick(kv, expo() + peerExpo({ skew: 60_000 }));
+    expect(pushHost(health).status).toBe("crit");
+    expect(pushHost(health).reasons).toContain("peer_skew");
   });
 
   it("a push-relay restart (counters reset) does not alert", async () => {
@@ -191,12 +280,16 @@ describe("dashboard card for the push relay", () => {
     const kv = fileStore(dir);
     await kv.put("health", JSON.stringify({
       at: Date.now(), fleet: true, mapError: null, mapVersion: 1,
-      summary: { total: 2, ok: 2, warn: 0, crit: 0 },
+      summary: { total: 3, ok: 3, warn: 0, crit: 0 },
       hosts: [
         { host: "relay1.iterm2.com", status: "ok", ageMs: 1000, sockets: 1, rooms: 0, buckets: 65536, probeOk: true, reasons: [] },
         { host: "push.iterm2.com", kind: "push", status: "ok", checkedAt: Date.now() - 60_000, ageMs: 0, probeOk: true, reasons: [],
           detailUrl: "https://mcnachman.cloud/push-dashboard/",
-          push: { devices: 7, sessions: 1, lastDeliveryAgeMs: 120_000, delivered: 4, failed: 1, timeouts: 0 } },
+          push: { devices: 7, sessions: 1, lastDeliveryAgeMs: 120_000, delivered: 4, failed: 1, timeouts: 0,
+            peerOutbox: 3, peerSkewMs: 18, peerLastOkKnown: true, peerLastOkAgeMs: 30_000 } },
+        { host: "old-push.example", kind: "push", status: "ok", checkedAt: Date.now(), ageMs: 0, probeOk: true, reasons: [],
+          push: { devices: 1, sessions: 1, lastDeliveryAgeMs: null, peerOutbox: 0, peerSkewMs: 0,
+            peerLastOkKnown: false, peerLastOkAgeMs: null } },
       ],
       due: [],
     }));
@@ -205,12 +298,17 @@ describe("dashboard card for the push relay", () => {
     const base = await new Promise((r) => server.listen(0, "127.0.0.1", () => r(`http://127.0.0.1:${server.address().port}`)));
     try {
       const html = await (await fetch(`${base}/dashboard`, { headers: { authorization: "Basic " + Buffer.from("a:k").toString("base64") } })).text();
-      expect(html).toContain("2/2 healthy");                       // push counts, and was not flipped to crit for lacking latest:<host>
+      expect(html).toContain("3/3 healthy");                       // push counts, and was not flipped to crit for lacking latest:<host>
       expect(html).toContain("push.iterm2.com");
       expect(html).toContain('href="https://mcnachman.cloud/push-dashboard/"');
       expect(html).toContain("4 ok / 1 failed");
       expect(html).toContain("last delivery");
       expect(html).toMatch(/checked<\/span><span class=v>60s ago/);
+      expect(html).toMatch(/peer queue<\/span><span class=v>3</);
+      expect(html).toMatch(/peer clock<\/span><span class=v>\+18ms</);
+      expect(html).toMatch(/peer answered<\/span><span class=v>30s ago</);
+      // An older relay without the liveness gauge gets no "peer answered" row.
+      expect(html.match(/peer answered/g).length).toBe(1);
     } finally { server.close(); }
   });
 });

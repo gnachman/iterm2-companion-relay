@@ -289,6 +289,13 @@ function cardHtml(h, detailTpl) {
     if (h.push.timeouts) rows.push(row("APNs timeouts", h.push.timeouts));
     rows.push(row("APNs sessions", h.push.sessions));
     rows.push(row("devices", h.push.devices));
+    if (h.push.peerOutbox != null) {
+      rows.push(row("peer queue", h.push.peerOutbox));
+      rows.push(row("peer clock", `${h.push.peerSkewMs >= 0 ? "+" : ""}${h.push.peerSkewMs}ms`));
+      if (h.push.peerLastOkKnown) {
+        rows.push(row("peer answered", h.push.peerLastOkAgeMs == null ? "not yet" : `${ago(h.push.peerLastOkAgeMs)} ago`));
+      }
+    }
   }
   rows.push(row("inbound", h.probeOk == null ? "-" : (h.probeOk ? "ok" : "FAILING")));
   const why = h.status !== "ok" && h.reasons && h.reasons.length

@@ -22,7 +22,7 @@
 
 import {
   parseConfig, normalizeSnapshot, deltas, rollHour, hourKey, analyze, dueAlerts,
-  livenessAlert, probeAlert, parsePushMetrics, pushDeltas, pushAlerts,
+  livenessAlert, probeAlert, parsePushMetrics, pushDeltas, pushAlerts, peerAlerts,
 } from "./monitor.js";
 
 // Direct-mode (no shard map) push lands under this single key; fleet-mode pushes
@@ -211,8 +211,17 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
     const interval = cur ? pushDeltas(ps.prev, cur.counters) : null;
     for (const a of pushAlerts(interval, cfg)) { reasons.push(a.key); alerts.push(hostAlert(label, true, a)); }
 
+    // Peering with a second push relay instance (only when it has a peer).
+    const peer = cur ? cur.peer : null;
+    const peerOutboxStreak = peer && peer.outbox > 0 ? (ps.peerOutboxStreak || 0) + 1 : 0;
+    // When we first saw "never answered since it started" (reset once it answers).
+    const peerNeverSince = peer && peer.hasLastOk && peer.lastOkTs === 0 ? (ps.peerNeverSince ?? now) : null;
+    const peerFindings = peerAlerts(peer, ps.prevPeer || null, peerOutboxStreak, cfg, now, peerNeverSince);
+    for (const a of peerFindings) { reasons.push(a.key); alerts.push(hostAlert(label, true, a)); }
+
     const crit = !cur || (probe ? !probe.ok : false) || reasons.some((k) => k === "apns_auth")
-      || pushAlerts(interval, cfg).some((a) => a.severity === "critical");
+      || pushAlerts(interval, cfg).some((a) => a.severity === "critical")
+      || peerFindings.some((a) => a.severity === "critical");
     const warn = !crit && reasons.some((k) => k !== "liveness" && k !== "probe");
     const lastDeliveryAgeMs = cur && cur.gauges.lastDeliveryTs > 0 ? Math.max(0, now - cur.gauges.lastDeliveryTs * 1000) : null;
     summaries.push({
@@ -231,11 +240,25 @@ export async function run(env, now, { dry, kv, sendEmail, fetchMap, probeOne, ro
         delivered: interval ? interval.delivered : null,
         failed: interval ? interval.failed : null,
         timeouts: interval ? interval.timeouts : null,
+        peerOutbox: peer ? peer.outbox : null,
+        peerSkewMs: peer ? peer.skewMs : null,
+        // Known = the relay exports the liveness gauge (older ones don't); then
+        // a null age means it hasn't answered since the relay started.
+        peerLastOkKnown: !!(peer && peer.hasLastOk),
+        peerLastOkAgeMs: peer && peer.hasLastOk && peer.lastOkTs > 0 ? Math.max(0, now - peer.lastOkTs * 1000) : null,
       } : null,
     });
     // Keep the previous good counters across a failed scrape so the next success
     // still has a baseline (a restart is then caught by the backwards counter).
-    nextPush = { prev: cur ? cur.counters : ps.prev, scrapeFailStreak, probeFailStreak };
+    // The peer baseline and streak carry across a failed scrape the same way.
+    nextPush = {
+      prev: cur ? cur.counters : ps.prev,
+      prevPeer: cur ? cur.peer : (ps.prevPeer || null),
+      peerOutboxStreak: cur ? peerOutboxStreak : (ps.peerOutboxStreak || 0),
+      peerNeverSince: cur ? peerNeverSince : (ps.peerNeverSince ?? null),
+      scrapeFailStreak,
+      probeFailStreak,
+    };
   }
 
   const { due, sentAt } = dueAlerts(alerts, state.sentAt || {}, now, cfg.cooldownMs);

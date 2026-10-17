@@ -20,12 +20,11 @@ else
   title="relay-watch"; body="${1:-relay-watch alert}"
 fi
 
-# Belt-and-suspenders: source watch.env if the vars are not already present (e.g.
-# invoked outside the watcher session). Harmless when they are.
-if [ -z "${ITERM_PUSH_TOKEN:-}" ] || [ -z "${ITERM_PUSH_SECRET:-}" ]; then
-  here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-  [ -f "$here/watch.env" ] && { set -a; . "$here/watch.env"; set +a; }
-fi
+# Always re-read watch.env when it exists, even inside the watcher session (which
+# exported it at startup): after the phone is re-paired and watch.env updated,
+# the session's copy is stale, and every relay answers 403 "bad secret".
+here="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+[ -f "$here/watch.env" ] && { set -a; . "$here/watch.env"; set +a; }
 
 logdir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/state"
 mkdir -p "$logdir"
@@ -38,10 +37,21 @@ if [ -z "${ITERM_PUSH_TOKEN:-}" ] || [ -z "${ITERM_PUSH_SECRET:-}" ]; then
   exit 1
 fi
 
-if "$HOME/bin/it2-notify" "$title" "$body"; then
-  printf '%s pushed: %s - %s\n' "$stamp" "$title" "$body" >> "$logdir/notify.log"
-else
-  rc=$?
-  printf '%s PUSH FAILED (it2-notify rc=%s): %s - %s\n' "$stamp" "$rc" "$title" "$body" | tee -a "$logdir/notify.log" >&2
-  exit "$rc"
-fi
+# Try each push relay in turn, so a page still goes out while push.iterm2.com
+# (mcnachman.cloud) is down, the outage this watcher most needs to report. The
+# relays share registrations, so the phone is reachable through either.
+# NOTIFY_PUSH_URLS (space-separated) overrides the list.
+urls="${NOTIFY_PUSH_URLS:-https://push.iterm2.com https://push2.iterm2.com}"
+failures=""
+rc=1
+for url in $urls; do
+  if "$HOME/bin/it2-notify" --url "$url" "$title" "$body"; then
+    printf '%s pushed via %s%s: %s - %s\n' "$stamp" "$url" "${failures:+ (after: $failures)}" "$title" "$body" >> "$logdir/notify.log"
+    exit 0
+  else
+    rc=$?
+    failures="${failures:+$failures, }$url rc=$rc"
+  fi
+done
+printf '%s PUSH FAILED (%s): %s - %s\n' "$stamp" "$failures" "$title" "$body" | tee -a "$logdir/notify.log" >&2
+exit "$rc"

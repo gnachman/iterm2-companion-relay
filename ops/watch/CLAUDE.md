@@ -111,6 +111,10 @@ confirmed no-tty context (both delivered).
   it works even if invoked outside the session.
 - Call it `notify.sh "TITLE" "body"` (preferred) or `notify.sh "single message"`
   (1-arg form the playbook uses; title defaults to `relay-watch`).
+- It tries `push.iterm2.com`, then `push2.iterm2.com` (override with
+  `NOTIFY_PUSH_URLS`), so a page still goes out while mcnachman.cloud is down. The
+  relays share registrations, so either reaches the phone. The log line names the
+  relay that delivered and any that failed first.
 - Every page is appended to `state/notify.log`. If creds are missing it logs + prints
   to stderr and exits non-zero rather than silently dropping the page.
 

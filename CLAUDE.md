@@ -37,6 +37,9 @@ on `127.0.0.1:8789` (both loopback-only, hardened systemd units); Caddy on 443
 terminating TLS (Let's Encrypt) → relay, with the dashboard under `/dashboard/`
 (in-app basic auth). Runtime users default to systemd DynamicUsers, or set
 `RELAY_SERVICE_USER` / `DASHBOARD_SERVICE_USER` for fixed named accounts.
+The generated Caddyfile is rewritten on every full deploy, so other sites on
+the box (e.g. a push relay instance) go in their own files in
+`/etc/caddy/sites.d/*.caddy`, which it imports.
 
 Current production instance: `relay1.iterm2.com` (Option A — Caddy + Let's Encrypt,
 gray-cloud DNS-only, IPv4-only).

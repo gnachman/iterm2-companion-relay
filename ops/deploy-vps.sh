@@ -248,6 +248,10 @@ if is_true "$ENABLE_DASHBOARD"; then
 else
   dash_block=""
 fi
+# Other sites on this box (e.g. a push relay instance) go in their own files in
+# /etc/caddy/sites.d/, which the generated Caddyfile imports, so rewriting the
+# Caddyfile here never erases them. A glob that matches nothing is fine.
+sudo install -d -m 0755 /etc/caddy/sites.d
 echo "==> Writing /etc/caddy/Caddyfile"
 printf '%s\n' "# iTerm2 companion relay (Option A: Caddy-managed TLS). Managed by
 # ops/deploy-vps.sh. Access logging is discarded to preserve the relay's
@@ -266,7 +270,10 @@ ${dash_block}
     log {
         output discard
     }
-}" | sudo tee /etc/caddy/Caddyfile >/dev/null
+}
+
+# Other sites on this box, one file each (not managed by this script).
+import /etc/caddy/sites.d/*.caddy" | sudo tee /etc/caddy/Caddyfile >/dev/null
 sudo caddy fmt --overwrite /etc/caddy/Caddyfile
 sudo caddy validate --config /etc/caddy/Caddyfile
 sudo systemctl reload caddy || sudo systemctl restart caddy

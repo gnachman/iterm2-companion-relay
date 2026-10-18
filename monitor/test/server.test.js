@@ -10,7 +10,7 @@ import { join } from "node:path";
 import { WebSocketServer } from "ws";
 
 import { fileStore } from "../src/store.js";
-import { createServer, nodeProbe } from "../src/server.js";
+import { createServer, nodeProbe, themeAt, THEME_SWAP_MS } from "../src/server.js";
 
 const cleanups = [];
 afterEach(() => { while (cleanups.length) cleanups.pop()(); });
@@ -266,5 +266,17 @@ describe("createServer - /dashboard (fleet health page)", () => {
     const res = await fetch(`${base}/dashboard`, { headers: { authorization: auth } });
     expect(res.status).toBe(200);
     expect(await res.text()).toMatch(/Collecting data/i);
+  });
+
+  it("alternates light and dark every 30 minutes, on the clock", async () => {
+    const half = 30 * 60 * 1000;
+    expect(THEME_SWAP_MS).toBe(half);
+    expect(themeAt(0)).toBe("light");
+    expect(themeAt(half - 1)).toBe("light");
+    expect(themeAt(half)).toBe("dark");
+    expect(themeAt(2 * half)).toBe("light");
+    const base = await listen(createServer(env, { kv: fileStore(tmpDir()) }));
+    const html = await (await fetch(`${base}/dashboard`, { headers: { authorization: auth } })).text();
+    expect(html).toMatch(/<html data-theme=(light|dark)>/);
   });
 });

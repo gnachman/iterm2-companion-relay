@@ -171,7 +171,9 @@ One color-coded card per relay (green ok / amber degraded / red down or
 inbound-failing) with just the essentials - last-seen, live sockets/rooms, owned
 buckets, inbound probe - plus an "X of Y healthy" header. Liveness and gauges are
 recomputed live on each load (no re-probing); the probe result is as of the last
-tick. Auto-refreshes every 30s.
+tick. Auto-refreshes every 30s. To spare a screen that leaves it open, it switches
+between light and dark every 30 minutes on the clock (ignoring the OS setting),
+so every monitor flips at the same moment.
 
 **Click a card** to open that shard's own detailed dashboard. The link comes from
 `DASHBOARD_URL_TEMPLATE` (default `https://{host}/dashboard/`, matching the managed

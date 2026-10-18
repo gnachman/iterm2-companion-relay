@@ -322,7 +322,7 @@ function cardHtml(h, detailTpl) {
 const DASH_CSS = `
 :root{--bg:#f6f7f9;--fg:#1a1d21;--card:#fff;--muted:#6b7280;--line:#e5e7eb;
 --ok:#16a34a;--warn:#d97706;--crit:#dc2626}
-@media(prefers-color-scheme:dark){:root{--bg:#0f1216;--fg:#e6e8eb;--card:#171b21;--muted:#9aa4b2;--line:#262c34}}
+:root[data-theme=dark]{--bg:#0f1216;--fg:#e6e8eb;--card:#171b21;--muted:#9aa4b2;--line:#262c34}
 *{box-sizing:border-box}body{margin:0}
 .wrap{font:15px/1.5 system-ui,sans-serif;color:var(--fg);background:var(--bg);min-height:100vh;padding:24px}
 h1{font-size:18px;margin:0 0 12px}.muted{color:var(--muted)}
@@ -386,9 +386,18 @@ async function liveHealth(env, kv, now) {
   return { ...health, hosts, summary, at: now, probeAt: health.at };
 }
 
+// The page is often left open on a wall display, so it alternates light and dark
+// every THEME_SWAP_MS to keep the layout from burning into the screen. Chosen
+// from the clock (not per page load), so every monitor flips at the same moment;
+// the page's own refresh picks up the change.
+export const THEME_SWAP_MS = 30 * 60 * 1000;
+export function themeAt(now) {
+  return Math.floor(now / THEME_SWAP_MS) % 2 ? "dark" : "light";
+}
+
 function renderDashboard(health, now, detailTpl, label = "") {
   const head = (title, refresh) =>
-    `<!doctype html><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">`
+    `<!doctype html><html data-theme=${themeAt(now)}><meta charset=utf-8><meta name=viewport content="width=device-width,initial-scale=1">`
     + `<meta http-equiv=refresh content=${refresh}><title>${esc(title)}</title><style>${DASH_CSS}</style>`;
   if (!health) {
     return `${head("Relay fleet", 15)}<div class=wrap><h1>iTerm2 relay fleet</h1>`

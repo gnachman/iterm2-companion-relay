@@ -123,38 +123,32 @@ sudo.
 
 ## Paging the phone (works headless)
 
-`notify.sh` pages George's phone with a real network push that works from Claude's
-Bash tool and the heartbeat (no tty needed). On a Mac it shells out to
-`~/bin/it2-notify` (a macOS binary); here, with no it2-notify, it uses
-`push-send.mjs`, which makes the same request: `POST <relay>/push
-{token, secret, title, body}` (the push relay's source is
-`Companion/PushRelay/src/worker.js` in the iTerm2 repo).
+`notify.sh` pages George's phone through **ntfy.sh**: one POST to
+`https://ntfy.sh/<topic>`, which the ntfy app on his phone subscribes to. It works
+from Claude's Bash tool and the heartbeat (no tty needed), and it doesn't depend on
+the iTerm2 push relays, so it still pages while push.iterm2.com is the thing that's
+down. (Until 2026-10 it used `~/bin/it2-notify`, a macOS binary, through those relays.)
 Call it `notify.sh "TITLE" "body"` (preferred) or `notify.sh "single message"`
 (title defaults to `relay-watch`).
 
-- **Credentials** (`pushcreds.sh`): on a Mac, from the iTerm2 app's own storage on
-  every call (`it2-notify --print-secrets`). Here there is no iTerm2, so they're a
-  copy in `push.env` (gitignored, mode 600, `ITERM_PUSH_TOKEN=` /
-  `ITERM_PUSH_SECRET=` lines), made on the Mac with
-  `~/bin/it2-notify --print-secrets > /tmp/push.env && scp /tmp/push.env minipc:iterm2-companion-relay/ops/watch/push.env && rm /tmp/push.env`
-  (never paste it). A copy goes stale when the phone is re-paired: that's how every
-  page silently failed with 403 "bad secret" through the 2026-10-16 outage. So
-  `notify.sh` records a 403 from a relay in `state/push-rejected`, and
-  `check-notify.sh` reports it (emailed, below) until `push.env` is newer than that
-  record, i.e. refreshed. Never in `watch.env`; inherited `ITERM_PUSH_*` values are
-  ignored.
-- **Relays:** it tries `push.iterm2.com`, then `push2.iterm2.com` (override with
-  `NOTIFY_PUSH_URLS`), so a page still goes out while mcnachman.cloud is down.
-- **Email fallback:** if no relay delivers, it emails the page (`email.sh`, Resend;
-  `RESEND_API_KEY`/`ALERT_FROM`/`ALERT_TO` in `watch.env`) with the push error. It
-  exits 0 when George was reached either way, non-zero only if both failed.
+- **Priority:** a page goes out `high` (breaks through on the phone). Use
+  `notify.sh --low "RECOVERED" "..."` for FYI messages (quiet). George's ntfy
+  etiquette: one push per event, never per retry; `urgent` is not used. Tags are
+  `rotating_light,relay-watch` / `white_check_mark,relay-watch` (Lalia's own pushes
+  use `robot`), and tapping opens https://mcnachman.cloud/fleet.
+- **The topic is a secret** (anyone who has it can post or read). It lives in
+  `/etc/lalia/ntfy.env` (mode 600, `NTFY_TOPIC=...`; override the path with
+  `NTFY_ENV_FILE`), loaded by `ntfy-topic.sh`. Never echo, log, or commit it; the
+  log lines and error messages never contain it.
+- **Email fallback:** if ntfy doesn't return 200 (one retry after 5 s), it emails the
+  page (`email.sh`, Resend; `RESEND_API_KEY`/`ALERT_FROM`/`ALERT_TO` in `watch.env`)
+  with the push error. It exits 0 when George was reached either way, non-zero only
+  if both failed.
 - **Checked continuously:** the heartbeat runs `check-notify.sh` every 10 min
-  (`WATCH_NOTIFY_CHECK_INTERVAL`): a sender present, credentials readable, the last
-  real page not rejected, email configured. A failure is logged
+  (`WATCH_NOTIFY_CHECK_INTERVAL`): topic loadable, `https://ntfy.sh/v1/health`
+  healthy (posts nothing; retried once), email configured. A failure is logged
   (`PAGING PATH BROKEN`) and emailed, again every 6 h while it lasts, and once more
-  when fixed. The relays have no credentials-only call, so the last real page is the
-  end-to-end check; a stale copy shows up at the first page after a re-pair (which
-  then goes out by email).
+  when fixed.
 - Every page is appended to `state/notify.log`.
 
 ## Investigating a relay from here (read-only, on-box)
@@ -191,10 +185,8 @@ a shard-map-fetch alert is diagnosable from `./probe-relay.sh journal`.
 - `run.sh` - idempotent bootstrap of the tmux session
 - `ROLE.txt` - Claude's standing role prompt
 - `PLAYBOOK.md` - the triage procedure Claude follows on a `TRIAGE:` poke
-- `notify.sh` - phone page via `it2-notify` or `push-send.mjs`, email if push fails (see above)
-- `push-send.mjs` - sends one push through a push relay (Linux stand-in for it2-notify)
-- `pushcreds.sh` - loads the push credentials: the app's on a Mac, `push.env` here (sourced)
-- `push.env` - the phone's push token + secret, copied from the Mac (gitignored, mode 600)
+- `notify.sh` - phone page via ntfy.sh, email if that fails (see above)
+- `ntfy-topic.sh` - loads the secret ntfy topic from `/etc/lalia/ntfy.env` (sourced)
 - `relay-forced-command.sh` - installed on the relays: the watcher key's forced command
 - `systemd/` - the user service + timer and their installer
 - `email.sh` - email via Resend, the second channel

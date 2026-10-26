@@ -95,6 +95,8 @@ TRANSIENT otherwise.
    ```
    ./notify.sh "RELAY DOWN: <host> unreachable from mini PC + monitor. <one-line detail>"
    ```
+   That goes out as a `high` ntfy push (breaks through). Recoveries use `--low`.
+   One page per incident: never re-page per retry.
 2. Write `state/incident-active.json`: `{host, kind:"real", firstSeen, lastEscalated}`.
 3. Write a full report to `incidents/<UTC-timestamp>-<host>.md`: the tick JSON across
    retries, the monitor response, public HTTPS results, your reasoning, and the
@@ -110,12 +112,12 @@ TRANSIENT otherwise.
 2. Append one line to `state/transients.log`: timestamp, host, whether it was local
    (`controlsOk` false) or a monitor-vs-this-vantage path blip, and how many retries to clear.
 3. If `state/incident-active.json` exists from a prior real incident, post a
-   `./notify.sh "RECOVERED: <host> reachable again"` and delete it.
+   `./notify.sh --low "RECOVERED: <host> reachable again"` and delete it.
 4. Finish your turn (go idle).
 
 ## On a `RESOLVED:` poke
 
-Re-probe once to confirm, post a short `./notify.sh "RECOVERED: ..."` only if you
+Re-probe once to confirm, post a short `./notify.sh --low "RECOVERED: ..."` only if you
 had paged for this incident, delete `state/incident-active.json`, append a closing
 line to the incident report, and go idle.
 

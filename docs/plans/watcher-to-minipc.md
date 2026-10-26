@@ -57,6 +57,13 @@ the Mac (never paste secrets into chat):
 
 ## Step 2: phone alerts (the hard part)
 
+**Superseded 2026-10-25:** paging moved to ntfy.sh instead (one POST to the
+private topic in `/etc/lalia/ntfy.env` that George's ntfy app subscribes to).
+No iTerm2 push credentials on the mini PC, nothing to go stale, and paging no
+longer depends on the push relays the watcher monitors. `check-notify.sh` checks
+`https://ntfy.sh/v1/health` without posting. See `ops/watch/CLAUDE.md`
+"Paging the phone". The original plan for this step follows, for the record.
+
 `notify.sh` and `pushcreds.sh` call `~/bin/it2-notify`, which is a **macOS
 arm64 binary** and does not run on Linux. It does two jobs:
 

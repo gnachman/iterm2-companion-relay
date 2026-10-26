@@ -46,9 +46,9 @@ running, there is no per-incident startup and nothing needs to self-exit.
 - **`ROLE.txt`** - the standing prompt that boots Claude into its idle watcher role.
 - **`PLAYBOOK.md`** - the triage Claude runs on a `TRIAGE:` poke: re-confirm,
   corroborate with the monitor's vantage, page-or-stand-down, record.
-- **`notify.sh`** - the escalation: a phone push through the push relays
-  (`it2-notify` on a Mac, `push-send.mjs` + `push.env` elsewhere), email if that
-  fails. `WATCH_SHADOW=1` logs instead of sending.
+- **`notify.sh`** - the escalation: a phone push through ntfy.sh (independent of
+  the iTerm2 push relays), email if that fails. `WATCH_SHADOW=1` logs instead of
+  sending.
 - **`.claude/settings.json`** - a tight allowlist. Claude may probe, curl, notify,
   and write incident files; `ssh`, `sudo`, `systemctl`, `kill`, `rm` etc. are
   denied, so the watcher can never touch production. (Read-only + notify by design.)
@@ -78,9 +78,9 @@ your everyday tmux, so your `tmux kill-server`/restarts never take it down. (A
 ## Paging
 
 `notify.sh` sends a real network push (no attached terminal needed) through
-push.iterm2.com, then push2.iterm2.com, and emails the page if neither delivers.
-See CLAUDE.md "Paging the phone" for credentials (`push.env` on the mini PC) and
-how a stale copy is detected.
+ntfy.sh to the ntfy app on George's phone, `high` priority for a page and
+`--low` for FYI, and emails the page if ntfy doesn't take it. The topic is a
+secret in `/etc/lalia/ntfy.env`. See CLAUDE.md "Paging the phone".
 
 ## Cost
 

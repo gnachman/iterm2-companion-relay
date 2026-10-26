@@ -17,7 +17,6 @@ ops/deploy-*.env
 # Relay watcher: local secrets + runtime artifacts (incident reports, tick
 # state, logs). The scripts, playbook, and example env stay tracked.
 ops/watch/watch.env
-ops/watch/push.env
 ops/watch/state/
 ops/watch/incidents/
 

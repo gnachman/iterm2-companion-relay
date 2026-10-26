@@ -1,0 +1,12 @@
+# Starts relay-watch.service 30s after boot and every 5 min after that, so a
+# dead session comes back. Needs linger (loginctl enable-linger) to run with
+# nobody logged in.
+[Unit]
+Description=Keep the iTerm2 relay watcher running
+
+[Timer]
+OnBootSec=30s
+OnUnitActiveSec=5min
+
+[Install]
+WantedBy=timers.target

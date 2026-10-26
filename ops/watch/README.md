@@ -1,10 +1,11 @@
-# Mac-side relay watcher
+# Relay watcher (runs on the mini PC)
 
-A watcher that runs on your Mac and reacts to relay trouble in minutes instead of
-whenever you happen to read the alert email. It leans on one fact: **your Mac is an
-independent second vantage from the mcnachman.cloud monitor.** If the Mac can
+A watcher that runs on the always-on mini PC at home (it ran on the Mac until
+2026-10; see CLAUDE.md) and reacts to relay trouble in minutes instead of
+whenever you happen to read the alert email. It leans on one fact: **this box is an
+independent second vantage from the mcnachman.cloud monitor.** If it can
 complete a real pairing handshake to a relay, that relay is serving users, whatever
-an alert said. So the Mac can tell the 99% case (a transient network/vantage blip)
+an alert said. So it can tell the 99% case (a transient network/vantage blip)
 apart from the 1% case (the relays' inbound path is genuinely broken) and only wake
 you for the latter.
 
@@ -19,11 +20,11 @@ tmux session "relay-watch" on private socket -L relaywatch  (survives iTerm2 det
                           │                              │
                           │                      verdict ok ─▶ keep probing, silent
                           │                              │
-                          │        sustained relay failure (Mac internet healthy)
+                          │        sustained relay failure (own internet healthy)
                           ▼
                     pokes the claude window: "TRIAGE: ..."
                           └─ Claude re-probes, cross-checks the monitor, decides
-                             real vs transient, pages via OSC 9 only if real,
+                             real vs transient, pages the phone only if real,
                              writes an incident report, then goes back to idle.
 ```
 
@@ -35,19 +36,19 @@ running, there is no per-incident startup and nothing needs to self-exit.
 
 - **`tick.mjs`** - the independent probe. Owned-room mac-park handshake to every
   host in the live shard map, plus control fetches (resolver, Cloudflare, Google)
-  that prove the Mac itself has internet. Prints one JSON verdict; exits 0 iff all
+  that prove this box itself has internet. Prints one JSON verdict; exits 0 iff all
   healthy. Run it by hand any time: `node tick.mjs`.
 - **`heartbeat.sh`** - the cheap probe loop. Pokes the `claude` window via
   `tmux send-keys` on sustained trouble; dedupes to one poke per incident. Skips
   entirely when the verdict is `mac-offline` (your own wifi), the biggest
-  false-alarm source. Never pages by itself (an OSC 9 from this background window
-  would not reach iTerm2 until you switched to it; Claude, in the window you attach
-  to, is the right emitter).
+  false-alarm source. Never pages by itself: Claude decides whether a failure is
+  real, so it owns the page.
 - **`ROLE.txt`** - the standing prompt that boots Claude into its idle watcher role.
 - **`PLAYBOOK.md`** - the triage Claude runs on a `TRIAGE:` poke: re-confirm,
   corroborate with the monitor's vantage, page-or-stand-down, record.
-- **`notify.sh`** - the escalation: an iTerm2 OSC 9 notification the companion app
-  forwards to your phone.
+- **`notify.sh`** - the escalation: a phone push through the push relays
+  (`it2-notify` on a Mac, `push-send.mjs` + `push.env` elsewhere), email if that
+  fails. `WATCH_SHADOW=1` logs instead of sending.
 - **`.claude/settings.json`** - a tight allowlist. Claude may probe, curl, notify,
   and write incident files; `ssh`, `sudo`, `systemctl`, `kill`, `rm` etc. are
   denied, so the watcher can never touch production. (Read-only + notify by design.)
@@ -56,10 +57,11 @@ running, there is no per-incident startup and nothing needs to self-exit.
 
 ```
 cp watch.env.example watch.env    # fill in MONITOR_PASSWORD (optional but useful)
-./run.sh                          # installs ws, starts the detached screen session
+./run.sh                          # installs ws, starts the detached tmux session
+./systemd/install-systemd.sh      # Linux: start at boot + self-heal every 5 min
 ```
 
-- Attach on the Mac: `tmux -L relaywatch attach -t relay-watch`. Two windows:
+- Attach: `ssh minipc -t tmux -L relaywatch attach -t relay-watch` (or, on the box, `tmux -L relaywatch attach -t relay-watch`). Two windows:
   switch with `Ctrl-b n`/`Ctrl-b p` (`claude`, `beat`), detach with `Ctrl-b d`.
 - Control from your phone: open the iTerm2 companion app, attach to the iTerm2
   session running `tmux -L relaywatch attach -t relay-watch`, switch to the `claude`
@@ -73,15 +75,12 @@ The watcher runs on a PRIVATE tmux socket (`-L relaywatch`), a separate server f
 your everyday tmux, so your `tmux kill-server`/restarts never take it down. (A
 `pkill tmux` would; stop it deliberately with the command above.)
 
-## The OSC 9 caveat (read this)
+## Paging
 
-OSC 9 is interpreted by whatever terminal is reading the tty. `notify.sh` writes it
-straight to `/dev/tty` (the screen pty) so it survives Claude's stdout capture. It
-reaches your phone when an **iTerm2 session is attached** to the screen session
-(the normal state, since that is also how you drive it). If iTerm2 is fully quit,
-the notification buffers until you reattach. For the truly-away case, the monitor's
-existing email remains the backstop. If you want an always-on push independent of an
-attached terminal, wire a second channel in `notify.sh` (Pushover/ntfy) later.
+`notify.sh` sends a real network push (no attached terminal needed) through
+push.iterm2.com, then push2.iterm2.com, and emails the page if neither delivers.
+See CLAUDE.md "Paging the phone" for credentials (`push.env` on the mini PC) and
+how a stale copy is detected.
 
 ## Cost
 
@@ -95,9 +94,9 @@ outage. Expect a handful of short Claude launches per week, not a 24/7 spend.
   needs production `ssh`, which is denied in the allowlist for safety. When triage
   says a real outage needs it, Claude escalates and you (now attached) run it. Ask
   if you want a narrowly-scoped `capture.sh` added to the allowlist.
-- **A liveness watchdog** for the watcher itself (a launchd job that checks
-  `state/last.json` is fresh and the screen session is alive, and restarts it if
-  not). Right now, if the Mac reboots you rerun `./run.sh`.
+- **A freshness watchdog** for the watcher itself (checks `state/last.json` is
+  recent, not just that the tmux session exists). The systemd timer
+  (`systemd/`) only re-creates a missing session.
 - **Context hygiene**: the live Claude accumulates history across incidents. It can
   `/compact`, or add a nightly restart of the `claude` window during healthy hours.
 

@@ -65,6 +65,11 @@ log "heartbeat up (quiet=${QUIET_INTERVAL}s retry=${RETRY_INTERVAL}s confirm=${C
 # watcher whose pages can't be delivered is useless and would otherwise only find
 # out at the next real incident (it did, 2026-10-16). A problem is emailed, since
 # the phone push may be the thing that's broken; email.sh failing too is logged.
+# In shadow mode (WATCH_SHADOW=1) these emails are only logged, like pages.
+mail() {
+  if [ "${WATCH_SHADOW:-0}" = 1 ]; then log "SHADOW (email not sent): $1"; return 0; fi
+  ./email.sh "$@" 2>>state/heartbeat.log
+}
 notify_broken=0
 notify_checked=0
 last_notify_check=0
@@ -79,7 +84,7 @@ check_paging() {
     notify_checked=1
     if [ "$notify_broken" = 1 ]; then
       log "paging path fixed"
-      ./email.sh "paging path fixed" "The relay watcher can page your phone again." 2>>state/heartbeat.log \
+      mail "paging path fixed" "The relay watcher on $(hostname -s) can page your phone again." \
         || log "WARN: could not email that the paging path is fixed"
       notify_broken=0
     fi
@@ -87,11 +92,11 @@ check_paging() {
   fi
   log "PAGING PATH BROKEN: $(printf '%s' "$out" | tr '\n' ';')"
   if [ "$notify_broken" = 0 ] || [ $((now - last_notify_mail)) -ge "$NOTIFY_REMIND_SECONDS" ]; then
-    if ./email.sh "paging path broken" "The relay watcher on your Mac cannot page your phone, so it would miss telling you about an outage:
+    if mail "paging path broken" "The relay watcher on $(hostname -s) cannot page your phone, so it would miss telling you about an outage:
 
 $out
 
-Fix it, then check with: ops/watch/check-notify.sh" 2>>state/heartbeat.log; then
+Fix it, then check with: ops/watch/check-notify.sh"; then
       last_notify_mail="$now"
     else
       log "WARN: could not email about the broken paging path either"

@@ -1,0 +1,19 @@
+# systemd user unit: start the watcher's tmux session if it isn't running
+# (run.sh is idempotent). Fired by relay-watch.timer at boot and every 5 min,
+# the Linux stand-in for the Mac's launchd agent. Install with
+# ./install-systemd.sh, which fills in @WATCH_DIR@.
+#
+# KillMode=process: run.sh exits right after starting the tmux server, and a
+# oneshot's leftover processes would otherwise be killed with it, taking the
+# watcher down seconds after every start.
+[Unit]
+Description=iTerm2 relay watcher (tmux session relay-watch)
+After=network-online.target
+
+[Service]
+Type=oneshot
+KillMode=process
+Environment=PATH=%h/.local/bin:/usr/local/bin:/usr/bin:/bin
+ExecStart=@WATCH_DIR@/run.sh
+StandardOutput=append:@WATCH_DIR@/state/systemd.log
+StandardError=append:@WATCH_DIR@/state/systemd.log

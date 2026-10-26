@@ -1,7 +1,8 @@
 # Relay watch triage playbook
 
 You are the always-live incident-responder for the iTerm2 companion relay fleet,
-running on George's Mac. You normally sit idle. A background heartbeat pokes you
+running on the mini PC (an always-on Linux box on George's home
+network). You normally sit idle. A background heartbeat pokes you
 with a `TRIAGE:` message when it sees sustained relay-reachability failures from
 this machine, and a `RESOLVED:` message when they clear. This playbook is what you
 do on a `TRIAGE:` poke.
@@ -52,7 +53,7 @@ treats it as healthy and the off-box monitor emails about it.)
 
 - If `verdict` becomes `ok`: it was a transient blip that already cleared. Go to
   "Transient". Do NOT page.
-- If `controlsOk` is false at any point: this Mac's own internet is flaky, not the
+- If `controlsOk` is false at any point: this machine's own internet is flaky, not the
   relays. Go to "Transient" (local). Do NOT page.
 - If a host stays unreachable across all retries AND `controlsOk` is true every
   time: this is looking real. Go to Step 2.
@@ -65,7 +66,7 @@ treats it as healthy and the off-box monitor emails about it.)
    - Monitor also says the host is crit AND you cannot reach it -> two independent
      vantages agree. REAL outage. Page.
    - Monitor says ok but you cannot reach it -> the break is on the path between
-     THIS Mac and the relay (your ISP / a transit route), not the relay itself.
+     THIS machine and the relay (your ISP / a transit route), not the relay itself.
      Transient-local; do not page, but log it clearly.
    - For `push-unreachable`, compare against the monitor's push relay cards
      (push.iterm2.com and push2.iterm2.com) on the same page instead of a relay row. For more detail, read the push
@@ -92,7 +93,7 @@ TRANSIENT otherwise.
 1. Page the phone via iTerm2 (dedupe: skip if `state/incident-active.json` exists
    with the same host and its `lastEscalated` is < 15 min ago):
    ```
-   ./notify.sh "RELAY DOWN: <host> unreachable from Mac + monitor. <one-line detail>"
+   ./notify.sh "RELAY DOWN: <host> unreachable from mini PC + monitor. <one-line detail>"
    ```
 2. Write `state/incident-active.json`: `{host, kind:"real", firstSeen, lastEscalated}`.
 3. Write a full report to `incidents/<UTC-timestamp>-<host>.md`: the tick JSON across
@@ -107,7 +108,7 @@ TRANSIENT otherwise.
 
 1. Do NOT page.
 2. Append one line to `state/transients.log`: timestamp, host, whether it was local
-   (`controlsOk` false) or a monitor-Mac-path blip, and how many retries to clear.
+   (`controlsOk` false) or a monitor-vs-this-vantage path blip, and how many retries to clear.
 3. If `state/incident-active.json` exists from a prior real incident, post a
    `./notify.sh "RECOVERED: <host> reachable again"` and delete it.
 4. Finish your turn (go idle).

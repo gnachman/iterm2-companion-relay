@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # The always-on heartbeat. No LLM. It samples tick.mjs on a timer and, only on
-# SUSTAINED relay-shaped trouble (with this Mac's own internet healthy), POKES the
+# SUSTAINED relay-shaped trouble (with this box's own internet healthy), POKES the
 # live `claude` window in this same tmux session via `tmux send-keys`, so the
 # interactive, phone-controllable Claude runs the triage and owns all user-facing
 # output (the OSC 9 page, the incident report). The heartbeat only decides WHEN to
@@ -108,19 +108,19 @@ Fix it, then check with: ops/watch/check-notify.sh"; then
 fails=0
 incident=0        # 1 while we believe an incident is active
 last_poke=0
-offline=0         # 1 while this Mac itself has no working internet
+offline=0         # 1 while this box itself has no working internet
 last_offline_log=0
 while true; do
   check_paging
   if node tick.mjs > state/tick.out 2> state/tick.err; then
-    if [ "$offline" = 1 ]; then log "fleet readable again from this Mac; resuming normal watch"; offline=0; fi
+    if [ "$offline" = 1 ]; then log "fleet readable again from this box; resuming normal watch"; offline=0; fi
     if [ "$incident" = 1 ]; then
       log "recovered; poking RESOLVED"
-      poke "RESOLVED: relays and push server reachable again from this Mac. Confirm, post recovery per PLAYBOOK.md, then stand down."
+      poke "RESOLVED: relays and push server reachable again from this box. Confirm, post recovery per PLAYBOOK.md, then stand down."
       incident=0
     fi
     fails=0
-    printf '%s  tick ok - all relays + push reachable from this Mac\n' "$(date '+%H:%M:%S')"
+    printf '%s  tick ok - all relays + push reachable from this box\n' "$(date '+%H:%M:%S')"
     sleep "$QUIET_INTERVAL"; continue
   fi
 
@@ -132,7 +132,7 @@ while true; do
   if [ "$verdict" = "push-degraded" ]; then
     if [ "$incident" = 1 ]; then
       log "recovered (a secondary push relay is still down); poking RESOLVED"
-      poke "RESOLVED: relays and the primary push relay are reachable again from this Mac; a secondary push relay is still down (no failover, users unaffected). Confirm, post recovery per PLAYBOOK.md, then stand down."
+      poke "RESOLVED: relays and the primary push relay are reachable again from this box; a secondary push relay is still down (no failover, users unaffected). Confirm, post recovery per PLAYBOOK.md, then stand down."
       incident=0
     fi
     fails=0
@@ -144,9 +144,9 @@ while true; do
     sleep "$QUIET_INTERVAL"; continue
   fi
 
-  # Conditions where this Mac cannot get a usable read of the fleet, so waking
+  # Conditions where this box cannot get a usable read of the fleet, so waking
   # Claude cannot help:
-  #   mac-offline     - this Mac has no working internet at all.
+  #   mac-offline     - this box has no working internet at all.
   #   tick-error      - the probe script itself errored.
   #   map-unreachable - the shard map (resolver) could not be fetched. Without it
   #                     we cannot build owned-room probes to verify sharded relays,
@@ -182,7 +182,7 @@ while true; do
       echo "# Relay watch incident $(date '+%Y-%m-%dT%H:%M:%S%z')"
       echo
       echo "Verdict: ${verdict}. ${fails} consecutive relay-reachability failures from"
-      echo "this Mac while this Mac's internet is healthy."
+      echo "this box while its own internet is healthy."
       echo
       echo '```json'
       cat state/tick.out
